@@ -119,7 +119,7 @@ class SupervisorAgent(BaseAgent):
 
         try:
             # Run the supervisor agent which will use handoffs to delegate
-            result = await Runner.run(self.agent, input=user_input)
+            result = await Runner.run(self.agent, input=user_input, max_turns=25)
             final_output = str(result.final_output)
 
             # Track which agents were involved via the run result

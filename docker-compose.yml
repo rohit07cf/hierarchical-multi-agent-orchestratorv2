@@ -11,7 +11,7 @@ services:
       - temporal-data:/var/lib/temporal
 
   temporal-ui:
-    image: temporalio/ui:2.34.0
+    image: temporalio/ui:2.26.2
     container_name: temporal-ui
     depends_on:
       - temporal
