@@ -8,11 +8,11 @@ from typing import Any
 
 from agents import Agent, Runner, function_tool
 
-from agents.base_agent import BaseAgent
-from agents.simple_agent import SimpleAgentDef
-from agents.math_agent import MathAgentDef
-from agents.echo_agent import EchoAgentDef
-from agents.classifier_agent import ClassifierAgentDef
+from agent_defs.base_agent import BaseAgent
+from agent_defs.simple_agent import SimpleAgentDef
+from agent_defs.math_agent import MathAgentDef
+from agent_defs.echo_agent import EchoAgentDef
+from agent_defs.classifier_agent import ClassifierAgentDef
 from models.agent_state import AgentState
 from models.supervisor_output import (
     SubtaskResult,

@@ -48,7 +48,7 @@ async def execute_agent_orchestration_activity(params: WorkflowParams) -> Workfl
         WorkflowResult with the orchestration output.
     """
     # Import here to avoid circular imports at module level
-    from agents.supervisor import SupervisorAgent
+    from agent_defs.supervisor import SupervisorAgent
 
     logger.info("Starting agent orchestration activity for: %s", params.user_input[:100])
 

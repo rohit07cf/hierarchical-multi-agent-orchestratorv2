@@ -6,7 +6,7 @@ from typing import Any
 
 from agents import function_tool
 
-from agents.base_agent import BaseAgent
+from agent_defs.base_agent import BaseAgent
 from prompts.react_prompt import get_react_prompt
 from models.tool_models import ToolResult
 
