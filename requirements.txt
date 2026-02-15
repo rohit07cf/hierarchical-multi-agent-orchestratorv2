@@ -1,0 +1,23 @@
+# Core dependencies
+openai-agents>=0.0.7
+openai>=1.66.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+
+# Temporal workflow orchestration
+temporalio>=1.9.0
+
+# Streamlit UI
+streamlit>=1.41.0
+
+# Visualization
+graphviz>=0.20.0
+
+# Async utilities
+asyncio-compat>=0.1.0
+
+# Logging
+structlog>=24.4.0
+
+# Environment management
+python-dotenv>=1.0.1
