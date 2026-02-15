@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   temporal:
     image: temporalio/auto-setup:1.25.2
