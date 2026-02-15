@@ -13,7 +13,7 @@ import streamlit as st
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agents.supervisor import SupervisorAgent
+from agent_defs.supervisor import SupervisorAgent
 from config.settings import get_settings
 from models.agent_state import HITLAction, HITLActionType
 from models.supervisor_output import SupervisorOutput
