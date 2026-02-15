@@ -7,6 +7,12 @@ import logging
 from typing import Any
 
 from agents import Agent, Runner, function_tool
+from agents.items import (
+    HandoffOutputItem,
+    MessageOutputItem,
+    ToolCallItem,
+    ToolCallOutputItem,
+)
 
 from agent_defs.base_agent import BaseAgent
 from agent_defs.simple_agent import SimpleAgentDef
@@ -122,21 +128,14 @@ class SupervisorAgent(BaseAgent):
             result = await Runner.run(self.agent, input=user_input, max_turns=25)
             final_output = str(result.final_output)
 
+            # Extract per-agent subtask results from the run trace
+            subtask_results, planned_subtasks = self._extract_subtask_results(result)
+
             # Track which agents were involved via the run result
             self._state.add_step(
                 agent_name=self.name,
                 action="orchestration_complete",
                 observation=final_output,
-            )
-
-            # Build subtask result from the orchestration
-            subtask_results.append(
-                SubtaskResult(
-                    agent_name="Supervisor",
-                    subtask=user_input,
-                    result=final_output,
-                    status=SubtaskStatus.COMPLETED,
-                )
             )
 
             return SupervisorOutput(
@@ -145,7 +144,7 @@ class SupervisorAgent(BaseAgent):
                 decomposition=TaskDecomposition(
                     original_request=user_input,
                     reasoning="Delegated via agent handoffs",
-                    subtasks=[],
+                    subtasks=planned_subtasks,
                 ),
             )
 
@@ -164,6 +163,97 @@ class SupervisorAgent(BaseAgent):
                     )
                 ],
             )
+
+    def _extract_subtask_results(
+        self, result: Any
+    ) -> tuple[list[SubtaskResult], list[PlannedSubtask]]:
+        """Extract per-agent subtask results from the SDK run trace.
+
+        Walks through result.new_items to reconstruct which child agents
+        were invoked, what tools they called, and what they produced.
+
+        Returns:
+            Tuple of (subtask_results, planned_subtasks).
+        """
+        # Track per-agent data: agent_name -> {tool_calls, result_text}
+        agent_data: dict[str, dict[str, Any]] = {}
+        current_child: str | None = None
+
+        for item in result.new_items:
+            agent_name = item.agent.name if item.agent else "Unknown"
+
+            # Track handoffs to child agents
+            if isinstance(item, HandoffOutputItem):
+                target_name = item.target_agent.name
+                if target_name != self.name:
+                    current_child = target_name
+                    if target_name not in agent_data:
+                        agent_data[target_name] = {"tool_calls": [], "result": None}
+                else:
+                    current_child = None
+
+            # Track tool calls made by child agents (not the Supervisor itself)
+            elif isinstance(item, ToolCallItem) and agent_name != self.name:
+                if agent_name not in agent_data:
+                    agent_data[agent_name] = {"tool_calls": [], "result": None}
+                tool_info = {"tool": getattr(item.raw_item, "name", "unknown")}
+                if hasattr(item.raw_item, "arguments"):
+                    tool_info["arguments"] = item.raw_item.arguments
+                agent_data[agent_name]["tool_calls"].append(tool_info)
+
+            # Track tool call outputs from child agents
+            elif isinstance(item, ToolCallOutputItem) and agent_name != self.name:
+                if agent_name not in agent_data:
+                    agent_data[agent_name] = {"tool_calls": [], "result": None}
+                agent_data[agent_name]["result"] = str(item.output)
+
+            # Track message outputs from child agents
+            elif isinstance(item, MessageOutputItem) and agent_name != self.name:
+                if agent_name not in agent_data:
+                    agent_data[agent_name] = {"tool_calls": [], "result": None}
+                text_parts = []
+                for content in item.raw_item.content:
+                    if hasattr(content, "text"):
+                        text_parts.append(content.text)
+                if text_parts:
+                    agent_data[agent_name]["result"] = " ".join(text_parts)
+
+        # Build SubtaskResult and PlannedSubtask lists
+        subtask_results: list[SubtaskResult] = []
+        planned_subtasks: list[PlannedSubtask] = []
+
+        for agent_name, data in agent_data.items():
+            tool_names = [tc.get("tool", "") for tc in data["tool_calls"]]
+            subtask_results.append(
+                SubtaskResult(
+                    agent_name=agent_name,
+                    subtask=f"Delegated to {agent_name}",
+                    result=data["result"],
+                    status=SubtaskStatus.COMPLETED if data["result"] else SubtaskStatus.FAILED,
+                    tool_calls=data["tool_calls"],
+                )
+            )
+            planned_subtasks.append(
+                PlannedSubtask(
+                    agent_name=agent_name,
+                    description=f"Delegated to {agent_name}",
+                    tools_needed=tool_names,
+                )
+            )
+
+        # If no child agents were tracked (e.g. supervisor handled it directly),
+        # fall back to a single supervisor result
+        if not subtask_results:
+            subtask_results.append(
+                SubtaskResult(
+                    agent_name="Supervisor",
+                    subtask="Direct response",
+                    result=str(result.final_output),
+                    status=SubtaskStatus.COMPLETED,
+                )
+            )
+
+        return subtask_results, planned_subtasks
 
     async def orchestrate_manual(self, user_input: str) -> SupervisorOutput:
         """Run orchestration with explicit manual decomposition and delegation.
