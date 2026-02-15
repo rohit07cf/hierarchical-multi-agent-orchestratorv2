@@ -13,9 +13,6 @@ streamlit>=1.41.0
 # Visualization
 graphviz>=0.20.0
 
-# Async utilities
-asyncio-compat>=0.1.0
-
 # Logging
 structlog>=24.4.0
 
