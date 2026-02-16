@@ -39,15 +39,20 @@ class HITLManager:
         return any(s.is_paused for s in self._active_states.values())
 
     def capture_state(self, state: AgentState) -> str:
-        """Capture and pause an agent's execution state for HITL review.
+        """Capture an agent's execution state for HITL review.
+
+        The state should already be paused (via state.pause()) with checkpoint_type
+        and pending_data set before calling this method.  If not yet paused, a
+        bare pause() is applied as a fallback.
 
         Args:
-            state: The AgentState to capture.
+            state: The AgentState to capture (should already be paused).
 
         Returns:
             The state_id for later retrieval.
         """
-        state.pause()
+        if not state.is_paused:
+            state.pause()
         self._active_states[state.state_id] = state
 
         if self._persistence_dir:
