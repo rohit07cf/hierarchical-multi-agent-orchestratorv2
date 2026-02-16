@@ -241,7 +241,8 @@ class SupervisorAgent(BaseAgent):
                 )
 
             elif checkpoint == HITLCheckpointType.TOOL_EXECUTION:
-                # User approved a tool execution — run it and continue
+                # User approved a tool execution — run the approved subtask,
+                # then continue to the next subtask (which will pause again).
                 decomposition_data = pending.get("decomposition", {})
                 decomposition = TaskDecomposition.model_validate(decomposition_data)
                 subtask_index = pending.get("subtask_index", 0)
@@ -252,13 +253,44 @@ class SupervisorAgent(BaseAgent):
                     SubtaskResult.model_validate(r) for r in completed_results
                 ]
 
-                # Continue from where we left off
+                # Execute the approved subtask NOW (don't re-enter the pause)
+                approved_planned = decomposition.subtasks[subtask_index]
+                logger.info(
+                    "Executing approved subtask %d: %s -> %s",
+                    subtask_index,
+                    approved_planned.agent_name,
+                    approved_planned.description[:60],
+                )
+                result = await self._execute_subtask(approved_planned)
+                subtask_results.append(result)
+                self._state.add_step(
+                    agent_name=approved_planned.agent_name,
+                    action=f"subtask_complete:{approved_planned.description[:60]}",
+                    observation=str(result.result) if result.result else str(result.error),
+                )
+
+                # Continue from the NEXT subtask (which will hit HITL pause)
+                next_index = subtask_index + 1
+                if next_index >= len(decomposition.subtasks):
+                    # All subtasks done — aggregate
+                    final_answer = self._aggregate_results(user_input, subtask_results)
+                    self._state.add_step(
+                        agent_name=self.name,
+                        action="orchestration_complete",
+                        observation=final_answer,
+                    )
+                    return SupervisorOutput(
+                        final_answer=final_answer,
+                        subtasks=subtask_results,
+                        decomposition=decomposition,
+                    )
+
                 return await self._execute_and_aggregate(
                     user_input,
                     decomposition,
                     hitl_manager,
                     enable_hitl=True,
-                    start_index=subtask_index,
+                    start_index=next_index,
                     prior_results=subtask_results,
                 )
 
