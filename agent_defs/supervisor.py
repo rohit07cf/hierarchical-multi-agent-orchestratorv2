@@ -93,16 +93,40 @@ class SupervisorAgent(BaseAgent):
         return [reasoning_step]
 
     def _build_agent(self) -> Agent:
-        """Build the supervisor agent with handoffs to child agents."""
+        """Build the supervisor agent with bidirectional handoffs to child agents.
+
+        Creates the supervisor first, then rebuilds each child agent with a
+        handoff back to the supervisor so control returns after each subtask.
+        """
         self._tools = self._register_tools()
-        child_sdk_agents = [child.agent for child in self._child_agents.values()]
-        return Agent(
+
+        # Build the supervisor agent first (without handoffs yet)
+        supervisor_agent = Agent(
             name=self.name,
             instructions=self._get_system_prompt(),
             tools=self._tools,
-            handoffs=child_sdk_agents,
+            handoffs=[],  # will be set after child agents are wired
             model=self.model,
         )
+
+        # Rebuild each child agent with a handoff back to the supervisor
+        child_sdk_agents = []
+        for child in self._child_agents.values():
+            child_agent = Agent(
+                name=child.name,
+                instructions=child._get_system_prompt(),
+                tools=child._register_tools(),
+                handoffs=[supervisor_agent],
+                model=child.model,
+            )
+            # Update the child's cached agent reference
+            child._agent = child_agent
+            child_sdk_agents.append(child_agent)
+
+        # Now set the supervisor's handoffs to point to the rebuilt child agents
+        supervisor_agent.handoffs = child_sdk_agents
+
+        return supervisor_agent
 
     async def orchestrate(self, user_input: str) -> SupervisorOutput:
         """Run the full orchestration pipeline: decompose, delegate, aggregate.
