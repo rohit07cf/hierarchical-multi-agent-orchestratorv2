@@ -199,9 +199,8 @@ class SupervisorAgent(BaseAgent):
         Returns:
             Tuple of (subtask_results, planned_subtasks).
         """
-        # Track per-agent data: agent_name -> {tool_calls, result_text}
+        # Track per-agent data: agent_name -> {tool_calls, tool_outputs, message}
         agent_data: dict[str, dict[str, Any]] = {}
-        current_child: str | None = None
 
         for item in result.new_items:
             agent_name = item.agent.name if item.agent else "Unknown"
@@ -210,50 +209,72 @@ class SupervisorAgent(BaseAgent):
             if isinstance(item, HandoffOutputItem):
                 target_name = item.target_agent.name
                 if target_name != self.name:
-                    current_child = target_name
                     if target_name not in agent_data:
-                        agent_data[target_name] = {"tool_calls": [], "result": None}
-                else:
-                    current_child = None
+                        agent_data[target_name] = {
+                            "tool_calls": [],
+                            "tool_outputs": [],
+                            "message": None,
+                        }
 
             # Track tool calls made by child agents (not the Supervisor itself)
             elif isinstance(item, ToolCallItem) and agent_name != self.name:
                 if agent_name not in agent_data:
-                    agent_data[agent_name] = {"tool_calls": [], "result": None}
+                    agent_data[agent_name] = {
+                        "tool_calls": [],
+                        "tool_outputs": [],
+                        "message": None,
+                    }
                 tool_info = {"tool": getattr(item.raw_item, "name", "unknown")}
                 if hasattr(item.raw_item, "arguments"):
                     tool_info["arguments"] = item.raw_item.arguments
                 agent_data[agent_name]["tool_calls"].append(tool_info)
 
-            # Track tool call outputs from child agents
+            # Collect all tool call outputs from child agents
             elif isinstance(item, ToolCallOutputItem) and agent_name != self.name:
                 if agent_name not in agent_data:
-                    agent_data[agent_name] = {"tool_calls": [], "result": None}
-                agent_data[agent_name]["result"] = str(item.output)
+                    agent_data[agent_name] = {
+                        "tool_calls": [],
+                        "tool_outputs": [],
+                        "message": None,
+                    }
+                agent_data[agent_name]["tool_outputs"].append(str(item.output))
 
-            # Track message outputs from child agents
+            # Track message outputs as fallback only
             elif isinstance(item, MessageOutputItem) and agent_name != self.name:
                 if agent_name not in agent_data:
-                    agent_data[agent_name] = {"tool_calls": [], "result": None}
+                    agent_data[agent_name] = {
+                        "tool_calls": [],
+                        "tool_outputs": [],
+                        "message": None,
+                    }
                 text_parts = []
                 for content in item.raw_item.content:
                     if hasattr(content, "text"):
                         text_parts.append(content.text)
                 if text_parts:
-                    agent_data[agent_name]["result"] = " ".join(text_parts)
+                    agent_data[agent_name]["message"] = " ".join(text_parts)
 
         # Build SubtaskResult and PlannedSubtask lists
         subtask_results: list[SubtaskResult] = []
         planned_subtasks: list[PlannedSubtask] = []
 
         for agent_name, data in agent_data.items():
+            # Prefer the first tool output (primary result) over message text.
+            # Messages often contain leaked transfer reasoning or summaries.
+            if data["tool_outputs"]:
+                result_text = data["tool_outputs"][0]
+            elif data["message"]:
+                result_text = data["message"]
+            else:
+                result_text = None
+
             tool_names = [tc.get("tool", "") for tc in data["tool_calls"]]
             subtask_results.append(
                 SubtaskResult(
                     agent_name=agent_name,
                     subtask=f"Delegated to {agent_name}",
-                    result=data["result"],
-                    status=SubtaskStatus.COMPLETED if data["result"] else SubtaskStatus.FAILED,
+                    result=result_text,
+                    status=SubtaskStatus.COMPLETED if result_text else SubtaskStatus.FAILED,
                     tool_calls=data["tool_calls"],
                 )
             )
