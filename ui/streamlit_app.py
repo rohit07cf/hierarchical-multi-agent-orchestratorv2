@@ -70,22 +70,42 @@ def get_supervisor(model: str) -> SupervisorAgent:
     return st.session_state["supervisor"]
 
 
-async def run_orchestration(user_input: str, model: str, mode: str) -> SupervisorOutput:
+async def run_orchestration(user_input: str, model: str, mode: str) -> SupervisorOutput | None:
     """Run the supervisor orchestration asynchronously.
 
     Args:
         user_input: The user's request.
         model: OpenAI model to use.
-        mode: 'auto' for handoff-based or 'manual' for explicit delegation.
+        mode: 'auto', 'manual', or 'hitl'.
 
     Returns:
-        SupervisorOutput from the orchestration.
+        SupervisorOutput from the orchestration, or None if paused for HITL.
     """
     supervisor = get_supervisor(model)
+    hitl_manager: HITLManager = st.session_state["hitl_manager"]
 
     if mode == "manual":
         return await supervisor.orchestrate_manual(user_input)
+    elif mode == "hitl":
+        return await supervisor.orchestrate(
+            user_input, hitl_manager=hitl_manager, enable_hitl=True,
+        )
     return await supervisor.orchestrate(user_input)
+
+
+async def resume_hitl(state_id: str, model: str) -> SupervisorOutput | None:
+    """Resume a paused HITL orchestration.
+
+    Args:
+        state_id: The paused state ID to resume.
+        model: OpenAI model to use.
+
+    Returns:
+        SupervisorOutput if complete, or None if paused again at next checkpoint.
+    """
+    supervisor = get_supervisor(model)
+    hitl_manager: HITLManager = st.session_state["hitl_manager"]
+    return await supervisor.resume_orchestration(hitl_manager, state_id)
 
 
 def render_sidebar() -> str:
@@ -115,13 +135,21 @@ def render_sidebar() -> str:
             st.session_state["messages"] = []
             st.session_state["orchestration_results"] = []
             st.session_state["streaming_steps"] = []
+            # Clear any paused HITL states
+            hitl_manager: HITLManager = st.session_state["hitl_manager"]
+            for state in hitl_manager.get_all_paused():
+                hitl_manager.cancel(state.state_id, reason="History cleared")
             st.rerun()
 
     return model
 
 
-def render_main_content() -> None:
-    """Render the main content area with chat and results."""
+def render_main_content(model: str) -> None:
+    """Render the main content area with chat and results.
+
+    Args:
+        model: Currently selected model name (for HITL resume).
+    """
     # Conversation history
     render_conversation_history(st.session_state["messages"])
 
@@ -142,13 +170,48 @@ def render_main_content() -> None:
         with st.expander("Streaming Log", expanded=False):
             render_streaming_output(st.session_state["streaming_steps"])
 
-    # HITL controls
+    # HITL controls — shown when execution is paused
     hitl_manager: HITLManager = st.session_state["hitl_manager"]
     hitl_action = render_hitl_controls(hitl_manager)
     if hitl_action:
         paused = hitl_manager.get_all_paused()
         if paused:
-            hitl_manager.apply_action(paused[0].state_id, hitl_action)
+            state_id = paused[0].state_id
+
+            # Apply the user's action to the paused state
+            hitl_manager.apply_action(state_id, hitl_action)
+
+            if hitl_action.action == HITLActionType.CANCEL:
+                st.session_state["messages"].append({
+                    "role": "assistant",
+                    "content": "Orchestration cancelled by user.",
+                })
+                st.rerun()
+                return
+
+            # Resume orchestration
+            with st.spinner("Resuming orchestration..."):
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    result = loop.run_until_complete(
+                        resume_hitl(state_id, model)
+                    )
+                    loop.close()
+
+                    if result is not None:
+                        # Orchestration completed (or ran to next pause)
+                        st.session_state["orchestration_results"].append(result)
+                        st.session_state["messages"].append({
+                            "role": "assistant",
+                            "content": result.final_answer,
+                        })
+                    # If result is None, we paused again — UI will show new controls
+
+                except Exception as e:
+                    st.error(f"Resume failed: {e}")
+                    logger.error("HITL resume error", exc_info=True)
+
             st.rerun()
 
 
@@ -204,12 +267,19 @@ def run_app() -> None:
                 )
                 loop.close()
 
-                # Store results
-                st.session_state["orchestration_results"].append(result)
-                st.session_state["messages"].append({
-                    "role": "assistant",
-                    "content": result.final_answer,
-                })
+                if result is not None:
+                    # Full completion (non-HITL mode or no pause triggered)
+                    st.session_state["orchestration_results"].append(result)
+                    st.session_state["messages"].append({
+                        "role": "assistant",
+                        "content": result.final_answer,
+                    })
+                else:
+                    # HITL mode — paused for review
+                    st.session_state["messages"].append({
+                        "role": "assistant",
+                        "content": "⏸️ Execution paused for your review. See the controls below.",
+                    })
 
                 # Capture streaming steps from handler
                 handler: StreamingCallbackHandler = st.session_state["streaming_handler"]
@@ -221,8 +291,8 @@ def run_app() -> None:
 
         st.rerun()
 
-    # Render main content
-    render_main_content()
+    # Render main content (including HITL controls)
+    render_main_content(model)
     render_state_inspector()
 
 
