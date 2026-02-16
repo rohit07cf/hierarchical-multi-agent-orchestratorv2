@@ -10,6 +10,13 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class HITLCheckpointType(str, Enum):
+    """Types of HITL checkpoints where execution can pause."""
+
+    DECOMPOSITION = "decomposition"
+    TOOL_EXECUTION = "tool_execution"
+
+
 class HITLActionType(str, Enum):
     """Types of human-in-the-loop interventions."""
 
@@ -87,6 +94,14 @@ class AgentState(BaseModel):
         default=False,
         description="Whether execution is currently paused for HITL",
     )
+    checkpoint_type: HITLCheckpointType | None = Field(
+        default=None,
+        description="Type of HITL checkpoint that caused the pause",
+    )
+    pending_data: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Data pending user review (e.g. decomposition plan, tool call details)",
+    )
     hitl_actions: list[HITLAction] = Field(
         default_factory=list,
         description="History of HITL interventions applied to this state",
@@ -94,9 +109,21 @@ class AgentState(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    def pause(self) -> None:
-        """Mark execution as paused for HITL review."""
+    def pause(
+        self,
+        checkpoint_type: HITLCheckpointType | None = None,
+        pending_data: dict[str, Any] | None = None,
+    ) -> None:
+        """Mark execution as paused for HITL review.
+
+        Args:
+            checkpoint_type: What kind of checkpoint triggered the pause.
+            pending_data: Data for the user to review (plan, tool call, etc.).
+        """
         self.is_paused = True
+        self.checkpoint_type = checkpoint_type
+        if pending_data:
+            self.pending_data = pending_data
         self.updated_at = datetime.now(timezone.utc)
 
     def resume(self, action: HITLAction) -> None:
