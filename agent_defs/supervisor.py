@@ -273,7 +273,7 @@ class SupervisorAgent(BaseAgent):
                 next_index = subtask_index + 1
                 if next_index >= len(decomposition.subtasks):
                     # All subtasks done — aggregate
-                    final_answer = self._aggregate_results(user_input, subtask_results)
+                    final_answer = await self._aggregate_results(user_input, subtask_results)
                     self._state.add_step(
                         agent_name=self.name,
                         action="orchestration_complete",
@@ -376,8 +376,8 @@ class SupervisorAgent(BaseAgent):
                 observation=str(result.result) if result.result else str(result.error),
             )
 
-        # All subtasks complete — aggregate
-        final_answer = self._aggregate_results(user_input, subtask_results)
+        # All subtasks complete — aggregate via LLM
+        final_answer = await self._aggregate_results(user_input, subtask_results)
 
         self._state.add_step(
             agent_name=self.name,
@@ -422,8 +422,8 @@ class SupervisorAgent(BaseAgent):
             result = await self._execute_subtask(planned)
             subtask_results.append(result)
 
-        # Step 3: Aggregate results
-        final_answer = self._aggregate_results(user_input, subtask_results)
+        # Step 3: Aggregate results via LLM
+        final_answer = await self._aggregate_results(user_input, subtask_results)
 
         self._state.add_step(
             agent_name=self.name,
@@ -438,19 +438,19 @@ class SupervisorAgent(BaseAgent):
         )
 
     async def _decompose_task(self, user_input: str) -> TaskDecomposition:
-        """Use the supervisor LLM to decompose a task into subtasks."""
+        """Use the supervisor's own LLM agent to decompose a task into subtasks.
+
+        The supervisor agent (with its system prompt and reasoning_step tool) is
+        invoked to analyze the request. The reasoning_step tool call captures the
+        structured plan, which is then parsed into a TaskDecomposition.
+        """
         decomposition_prompt = f"""Analyze this user request and decompose it into subtasks.
-For each subtask, specify which agent should handle it.
+First use the reasoning_step tool to plan your approach, then respond with the
+decomposition as JSON.
 
 User request: {user_input}
 
-Available agents:
-- SimpleAgent: [add_numbers, echo_text]
-- MathAgent: [add_numbers, subtract_numbers, multiply_numbers]
-- EchoAgent: [echo_text, reverse_text]
-- ClassifierAgent: [classify_intent, detect_sentiment]
-
-Respond in this JSON format:
+After using reasoning_step, respond ONLY with valid JSON in this exact format:
 {{
     "reasoning": "your analysis here",
     "subtasks": [
@@ -460,11 +460,7 @@ Respond in this JSON format:
 
         try:
             result = await Runner.run(
-                Agent(
-                    name="TaskDecomposer",
-                    instructions="You decompose tasks into subtasks. Always respond with valid JSON only.",
-                    model=self.model,
-                ),
+                self.agent,
                 input=decomposition_prompt,
             )
             raw = str(result.final_output)
@@ -550,18 +546,45 @@ Respond in this JSON format:
                 error=str(e),
             )
 
-    def _aggregate_results(
+    async def _aggregate_results(
         self, user_input: str, results: list[SubtaskResult]
     ) -> str:
-        """Combine subtask results into a coherent final answer."""
-        parts = []
+        """Use the supervisor's LLM to synthesize subtask results into a final answer.
+
+        The supervisor agent is invoked with the original request and all subtask
+        outputs, producing a coherent, user-facing summary.
+        """
+        # Build a structured summary of what each agent returned
+        result_parts = []
         for r in results:
             if r.is_success:
-                parts.append(f"[{r.agent_name}] {r.subtask}: {r.result}")
+                result_parts.append(f"- {r.agent_name} ({r.subtask}): {r.result}")
             else:
-                parts.append(f"[{r.agent_name}] {r.subtask}: FAILED - {r.error}")
+                result_parts.append(f"- {r.agent_name} ({r.subtask}): FAILED — {r.error}")
 
-        if not parts:
+        if not result_parts:
             return "No subtasks were executed."
 
-        return "\n".join(parts)
+        results_summary = "\n".join(result_parts)
+
+        synthesis_prompt = f"""The following subtasks have been completed for the user's request.
+Synthesize the results into a single, clear, natural answer for the user.
+
+Original user request: {user_input}
+
+Subtask results:
+{results_summary}
+
+Produce a clean, conversational answer. Do NOT include agent names, internal
+references, or formatting like "[AgentName]". Just answer the user naturally."""
+
+        try:
+            result = await Runner.run(
+                self.agent,
+                input=synthesis_prompt,
+            )
+            return str(result.final_output)
+        except Exception as e:
+            logger.warning("LLM aggregation failed, falling back to simple join: %s", e)
+            # Fallback to simple concatenation if LLM call fails
+            return results_summary
