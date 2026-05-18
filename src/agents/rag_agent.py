@@ -1,49 +1,110 @@
-"""RAGAgent — retrieves relevant context from the local knowledge base."""
+"""RAGAgent — LLM-driven retrieval of local knowledge-base context."""
 
 from __future__ import annotations
 
-from src.agents.base import BaseAgent
+from typing import Any
+
+from src.agents.base import ReasoningAgent
 from src.models.requests import AgentRequest
-from src.models.responses import AgentResponse
+from src.models.trace import (
+    AgentReasoning,
+    ToolDecision,
+    ToolInvocation,
+    ToolSpec,
+)
 from src.tools.document_loader import load_knowledge_base
 from src.tools.simple_retriever import SimpleRetriever
 
+_SYSTEM_PROMPT = (
+    "You are RAGAgent. Decide whether to (a) call simple_retriever to find "
+    "relevant local knowledge-base documents for the query, or (b) call "
+    "load_knowledge_base to enumerate what exists, or both. Prefer "
+    "simple_retriever when the query has clear topical keywords."
+)
 
-class RAGAgent(BaseAgent):
-    """Retrieves the top knowledge-base documents for a query.
 
-    Uses `SimpleRetriever` over local markdown files. The retrieved
-    documents are returned in `response.data['documents']` so the
-    SummarizerAgent can consume them downstream.
-    """
-
+class RAGAgent(ReasoningAgent):
     name = "RAGAgent"
-    tools = ["load_knowledge_base", "simple_retriever"]
+    system_prompt = _SYSTEM_PROMPT
 
     def __init__(self, model: str = "gpt-4.1-nano", top_k: int = 2) -> None:
         super().__init__(model=model)
-        self._retriever = SimpleRetriever(load_knowledge_base())
+        self._documents = load_knowledge_base()
+        self._retriever = SimpleRetriever(self._documents)
         self._top_k = top_k
+        self.tools = [
+            ToolSpec(
+                name="simple_retriever",
+                description=(
+                    "Return the top-k local knowledge-base documents whose "
+                    "tokens overlap the query. Args: query (str), top_k (int)."
+                ),
+                handler=self._tool_retrieve,
+            ),
+            ToolSpec(
+                name="load_knowledge_base",
+                description=(
+                    "List every knowledge-base document name; useful when "
+                    "the query is exploratory. No arguments."
+                ),
+                handler=self._tool_list,
+            ),
+        ]
 
-    async def handle(self, request: AgentRequest) -> AgentResponse:
-        if self._retriever.is_empty:
-            self._log("Knowledge base empty")
-            return AgentResponse(
-                agent_name=self.name,
-                content="No knowledge base documents available.",
-                data={"documents": []},
+    def user_prompt(self, request: AgentRequest) -> str:
+        return f"Query: {request.query}"
+
+    def _mock_reason_policy(self, request: AgentRequest):
+        def policy() -> AgentReasoning:
+            return AgentReasoning(
+                reasoning=(
+                    "Query has topical keywords and the local knowledge base "
+                    "exists; using simple_retriever to fetch the top documents."
+                ),
+                selected_tools=[
+                    ToolDecision(
+                        tool_name="simple_retriever",
+                        rationale="Find the most relevant docs by token overlap.",
+                        arguments={"query": request.query, "top_k": self._top_k},
+                    )
+                ],
+                skipped_tools=["load_knowledge_base"],
             )
 
-        docs = self._retriever.retrieve(request.query, top_k=self._top_k)
-        self._log(f"Retrieved {len(docs)} document(s)")
-        return AgentResponse(
-            agent_name=self.name,
-            content=f"Retrieved {len(docs)} document(s): "
-            + ", ".join(d.name for d in docs),
-            data={
-                "documents": [
-                    {"name": d.name, "score": d.score, "text": d.text}
-                    for d in docs
-                ],
-            },
-        )
+        return policy
+
+    def _mock_synthesize(self, request, reasoning, invocations) -> str | None:
+        docs = self._docs_from_invocations(invocations)
+        if not docs:
+            return "[mock-llm] No knowledge-base documents matched the query."
+        names = ", ".join(d["name"] for d in docs)
+        return f"[mock-llm] Retrieved {len(docs)} document(s): {names}."
+
+    def _extra_data(self, invocations: list[ToolInvocation]) -> dict[str, Any]:
+        return {"documents": self._docs_from_invocations(invocations)}
+
+    # ----------------- Tool handlers -----------------
+
+    def _tool_retrieve(self, query: str, top_k: int | None = None) -> dict:
+        docs = self._retriever.retrieve(query, top_k=top_k or self._top_k)
+        return {
+            "count": len(docs),
+            "documents": [
+                {"name": d.name, "score": d.score, "text": d.text}
+                for d in docs
+            ],
+        }
+
+    def _tool_list(self) -> dict:
+        return {
+            "count": len(self._documents),
+            "names": sorted(self._documents.keys()),
+        }
+
+    @staticmethod
+    def _docs_from_invocations(invocations: list[ToolInvocation]) -> list[dict]:
+        """Pull the document list out of the retriever invocation, if any."""
+        for inv in invocations:
+            if inv.tool_name == "simple_retriever" and inv.success and isinstance(inv.result, dict):
+                return inv.result.get("documents", [])
+        return []

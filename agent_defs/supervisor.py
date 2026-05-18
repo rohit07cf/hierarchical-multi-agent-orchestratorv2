@@ -57,7 +57,11 @@ def _plan_to_decomposition(state: OrchestratorState) -> TaskDecomposition:
 
 
 def _task_result_to_subtask(task) -> SubtaskResult:
-    """Convert a new `AgentTask` (post-execution) to a legacy `SubtaskResult`."""
+    """Convert a new `AgentTask` (post-execution) to a legacy `SubtaskResult`.
+
+    Carries the agent's reasoning trace (and any worker traces) through
+    `tool_calls` so the Streamlit subtask panel can render them.
+    """
     status_map = {
         TaskStatus.COMPLETED: SubtaskStatus.COMPLETED,
         TaskStatus.FAILED: SubtaskStatus.FAILED,
@@ -65,14 +69,22 @@ def _task_result_to_subtask(task) -> SubtaskResult:
         TaskStatus.PENDING: SubtaskStatus.PENDING,
     }
     result_payload: Any = None
+    tool_calls: list[dict[str, Any]] = []
     if task.result and isinstance(task.result, dict):
         result_payload = task.result.get("content") or task.result
+        trace = task.result.get("trace")
+        if isinstance(trace, dict):
+            tool_calls.append({"agent_trace": trace})
+        worker_traces = (task.result.get("data") or {}).get("worker_traces") or []
+        for wt in worker_traces:
+            tool_calls.append({"agent_trace": wt})
     return SubtaskResult(
         agent_name=task.agent_name,
         subtask=task.description,
         result=result_payload,
         status=status_map[task.status],
         error=task.error,
+        tool_calls=tool_calls,
     )
 
 
@@ -180,7 +192,11 @@ class SupervisorAgent:
         logger.info("Supervisor starting orchestration: %s", user_input[:100])
 
         try:
-            plan = self._root.plan(user_input)
+            # In HITL mode we materialize the plan up-front (without
+            # running it) so we can pause for the user to review the
+            # decomposition. Outside HITL the supervisor will await its
+            # own LLM-driven plan() during orchestrate().
+            plan = await self._root.plan(user_input)
 
             if enable_hitl and hitl_manager:
                 # HITL: we have to materialize the decomposition step on the
@@ -279,8 +295,9 @@ class SupervisorAgent:
         decomposition = TaskDecomposition.model_validate(decomposition_data)
 
         # Rebuild a fresh plan from the (possibly revised) input. The new
-        # supervisor's plan() is deterministic so this is reproducible.
-        plan = self._root.plan(user_input)
+        # supervisor's plan() is async (LLM-driven, with deterministic
+        # router fallback) so we await it here.
+        plan = await self._root.plan(user_input)
 
         # Pause-before-each-subtask semantics:
         # - DECOMPOSITION approval → re-pause at TOOL_EXECUTION for task 0

@@ -105,7 +105,12 @@ class ExecutionEngine:
                     agent_name=task.agent_name,
                     kind=ExecutionStepKind.SUBTASK_COMPLETE,
                     message=f"{task.agent_name} completed",
-                    payload={"output_preview": response.content[:300]},
+                    payload={
+                        "output_preview": response.content[:300],
+                        # Surface the agent's reasoning trace on the timeline
+                        # so the Streamlit state inspector can replay it.
+                        "trace": response.trace,
+                    },
                 )
             except Exception as e:
                 logger.exception("Subtask failed")

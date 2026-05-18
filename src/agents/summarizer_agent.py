@@ -1,70 +1,77 @@
-"""SummarizerAgent — condenses retrieved documents into a short context summary."""
+"""SummarizerAgent — LLM-driven summary of retrieved documents or pasted text.
+
+Has no external tools by default; the LLM synthesizes the summary
+directly from the user's text and any documents in `request.context`.
+The agent still produces a full reasoning trace so the user can see why
+it chose to summarize without calling any tools.
+"""
 
 from __future__ import annotations
 
-from src.agents.base import BaseAgent
-from src.models.requests import AgentRequest
-from src.models.responses import AgentResponse
+from typing import Any
 
-_SUMMARIZER_SYSTEM = (
-    "You are a concise summarizer. Given retrieved documents and a query, "
-    "produce a 2-3 sentence summary that directly answers the query using "
-    "only the documents."
+from src.agents.base import ReasoningAgent
+from src.models.requests import AgentRequest
+from src.models.trace import AgentReasoning, ToolInvocation
+
+
+_SYSTEM_PROMPT = (
+    "You are SummarizerAgent. Read the query plus any retrieved "
+    "documents and produce a concise 2-3 sentence summary that "
+    "directly answers the query using only the provided text."
 )
 
 
-class SummarizerAgent(BaseAgent):
-    """Summarize retrieved documents into a concise context blurb.
-
-    Consumes `request.context['documents']` (as produced by `RAGAgent`)
-    and returns a short summary. Falls back to a deterministic heuristic
-    when no LLM is available.
-    """
-
+class SummarizerAgent(ReasoningAgent):
     name = "SummarizerAgent"
-    tools = ["llm_summarize"]
+    system_prompt = _SYSTEM_PROMPT
+    tools = []  # no external tools; LLM synthesizes directly
 
-    async def handle(self, request: AgentRequest) -> AgentResponse:
+    def user_prompt(self, request: AgentRequest) -> str:
         documents = request.context.get("documents", [])
-        if not documents:
-            self._log("No documents to summarize")
-            return AgentResponse(
-                agent_name=self.name,
-                content="No documents were retrieved; nothing to summarize.",
-                data={"summary": ""},
+        if documents:
+            joined = "\n\n".join(
+                f"### {d['name']}\n{d['text']}" for d in documents
+            )
+            return f"Query: {request.query}\n\nDocuments:\n{joined}"
+        return f"Query: {request.query}"
+
+    def _mock_reason_policy(self, request: AgentRequest):
+        docs = request.context.get("documents", [])
+
+        def policy() -> AgentReasoning:
+            if docs:
+                rationale = (
+                    f"Found {len(docs)} retrieved document(s); no external "
+                    "tools needed — will summarize their content."
+                )
+            else:
+                rationale = (
+                    "No retrieved documents; will summarize the pasted text "
+                    "directly. No external tools needed."
+                )
+            return AgentReasoning(
+                reasoning=rationale,
+                selected_tools=[],
+                skipped_tools=[],
             )
 
-        joined = "\n\n".join(f"### {d['name']}\n{d['text']}" for d in documents)
-        prompt = (
-            f"Query: {request.query}\n\n"
-            f"Documents:\n{joined}\n\n"
-            "Write a 2-3 sentence summary answering the query."
+        return policy
+
+    def _mock_synthesize(self, request, reasoning, invocations) -> str | None:
+        docs = request.context.get("documents", [])
+        if docs:
+            names = ", ".join(d["name"] for d in docs[:3])
+            return (
+                f"[mock-llm] Would summarize {len(docs)} document(s) "
+                f"({names}). Set OPENAI_API_KEY for real natural-language summary."
+            )
+        snippet = request.query.strip().splitlines()[0][:160]
+        return (
+            f"[mock-llm] Would summarize the input ({len(request.query)} "
+            f"chars, starting with {snippet!r}). Set OPENAI_API_KEY for "
+            "real natural-language summary."
         )
 
-        if self.llm.enabled:
-            summary = await self.llm.complete(prompt, system=_SUMMARIZER_SYSTEM)
-        else:
-            summary = _heuristic_summary(request.query, documents)
-
-        self._log("Summary completed")
-        return AgentResponse(
-            agent_name=self.name,
-            content=summary,
-            data={"summary": summary, "source_documents": [d["name"] for d in documents]},
-        )
-
-
-def _heuristic_summary(query: str, documents: list[dict]) -> str:
-    """Build a deterministic summary by stitching the leading lines of each doc."""
-    parts: list[str] = []
-    for doc in documents[:2]:
-        text = doc.get("text", "")
-        first_paragraph = next(
-            (p.strip() for p in text.split("\n\n") if p.strip() and not p.strip().startswith("#")),
-            "",
-        )
-        if first_paragraph:
-            parts.append(f"From {doc['name']}: {first_paragraph[:240]}")
-    if not parts:
-        return f"No substantive content retrieved for query: {query!r}."
-    return " ".join(parts)
+    def _extra_data(self, invocations: list[ToolInvocation]) -> dict[str, Any]:
+        return {}

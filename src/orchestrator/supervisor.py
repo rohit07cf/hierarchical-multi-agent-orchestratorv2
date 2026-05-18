@@ -1,10 +1,24 @@
-"""RootSupervisorAgent — top of the 3-layer hierarchy."""
+"""RootSupervisorAgent — LLM-driven planner at the top of the hierarchy.
+
+The supervisor uses the LLM to:
+
+1. Decide which managers (ResearchManagerAgent, BuildManagerAgent, or
+   both) to invoke for the given query.
+2. Aggregate manager outputs into a single user-facing answer.
+
+In mock mode the planner falls back to the deterministic `Router` (the
+same intent-based rules tested in `tests/test_routing.py`), so the
+orchestration shape stays correct offline. Real LLM mode replaces the
+router decision with a structured JSON plan from the model.
+"""
 
 from __future__ import annotations
 
+import json
 import logging
+from typing import Any
 
-from src.agents.base import BaseAgent
+from src.agents.base import ReasoningAgent
 from src.agents.build_manager import BuildManagerAgent
 from src.agents.research_manager import ResearchManagerAgent
 from src.llm.client import get_llm_client
@@ -22,62 +36,121 @@ from src.orchestrator.router import Router
 logger = logging.getLogger(__name__)
 
 
-class RootSupervisorAgent:
-    """Top-level supervisor.
+_PLANNER_SYSTEM_PROMPT = (
+    "You are the RootSupervisorAgent at the top of a 3-layer hierarchical "
+    "multi-agent system. Two managers are available:\n"
+    "- ResearchManagerAgent: coordinates retrieval + summarization.\n"
+    "- BuildManagerAgent: coordinates code generation + review.\n\n"
+    "Pick which managers to invoke based on user intent:\n"
+    "- Reflective, philosophical, summarization, or rewriting requests → "
+    "ResearchManagerAgent only.\n"
+    "- Explicit code/implementation requests (build, implement, fastapi, "
+    "redis, write code, etc.) → BuildManagerAgent.\n"
+    "- Both, in Research→Build order, only when the user explicitly asks "
+    "to combine the two."
+)
 
-    Owns three responsibilities:
-    1. Plan — decompose the query into tasks via the `Router`.
-    2. Route — invoke the chosen manager agents through the
-       `ExecutionEngine`.
-    3. Aggregate — synthesize a single user-facing response.
-    """
+_AGGREGATOR_SYSTEM_PROMPT = (
+    "You synthesize multi-agent results into a clean, natural answer for "
+    "the user. Combine outputs verbatim where useful; never mention "
+    "internal agent names or routing decisions."
+)
+
+
+class RootSupervisorAgent:
+    """Top-level supervisor — LLM-driven plan / route / aggregate."""
 
     name = "RootSupervisorAgent"
-    tools = ["router", "execution_engine", "llm_aggregator"]
+    tools = ["llm_planner", "router_fallback", "execution_engine", "llm_aggregator"]
 
     def __init__(self, model: str = "gpt-4.1-nano") -> None:
         self.model = model
         self.llm = get_llm_client(model)
         self.router = Router()
-        self.managers: dict[str, BaseAgent] = {
+        self.managers: dict[str, ReasoningAgent] = {
             "ResearchManagerAgent": ResearchManagerAgent(model=model),
             "BuildManagerAgent": BuildManagerAgent(model=model),
         }
         self.engine = ExecutionEngine(self.managers)
         self.state: OrchestratorState | None = None
 
-    def plan(self, user_query: str) -> ExecutionPlan:
-        """Decompose `user_query` into an execution plan.
+    # ----------------- Planning -----------------
 
-        The plan is deterministic and built from the router decision so it
-        is reproducible across runs. Managers always come before workers
-        in the same chain since the build phase may consume context from
-        the research phase.
-        """
+    async def plan(self, user_query: str) -> ExecutionPlan:
+        """Build the execution plan. LLM-driven, deterministic mock fallback."""
+        if self.llm.enabled:
+            try:
+                return await self._llm_plan(user_query)
+            except Exception as e:
+                logger.warning("LLM planner failed, falling back to router: %s", e)
+        return self._router_plan(user_query)
+
+    async def _llm_plan(self, user_query: str) -> ExecutionPlan:
+        """Ask the LLM directly to produce a manager list + reasoning."""
+        from openai import AsyncOpenAI
+
+        prompt = (
+            f"User query: {user_query}\n\n"
+            "Respond with JSON in this exact shape:\n"
+            '{"reasoning": "<one-paragraph rationale>", '
+            '"managers": ["ResearchManagerAgent" | "BuildManagerAgent", ...]}'
+        )
+        client = AsyncOpenAI()
+        response = await client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": _PLANNER_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+        )
+        raw = response.choices[0].message.content or "{}"
+        parsed = json.loads(raw)
+        managers = [
+            m for m in parsed.get("managers", []) if m in self.managers
+        ]
+        reasoning = parsed.get("reasoning", "")
+        return self._build_plan(user_query, managers, reasoning)
+
+    def _router_plan(self, user_query: str) -> ExecutionPlan:
+        """Deterministic plan via the intent-based router (mock-mode fallback)."""
         decision = self.router.decide(user_query)
-        tasks: list[AgentTask] = []
+        managers: list[str] = []
         if decision.use_research:
-            tasks.append(
-                AgentTask(
-                    agent_name="ResearchManagerAgent",
-                    description=user_query,
-                    tools_needed=["RAGAgent", "SummarizerAgent"],
-                )
-            )
+            managers.append("ResearchManagerAgent")
         if decision.use_build:
+            managers.append("BuildManagerAgent")
+        reasoning = (
+            f"[mock-llm planner via deterministic router] {decision.reasoning}"
+        )
+        return self._build_plan(user_query, managers, reasoning)
+
+    def _build_plan(
+        self, user_query: str, managers: list[str], reasoning: str
+    ) -> ExecutionPlan:
+        """Wrap a manager list into an `ExecutionPlan` with the right tool hints."""
+        tools_by_manager = {
+            "ResearchManagerAgent": ["RAGAgent", "SummarizerAgent"],
+            "BuildManagerAgent": ["CodingAgent", "ReviewAgent"],
+        }
+        tasks: list[AgentTask] = []
+        for i, manager_name in enumerate(managers):
             tasks.append(
                 AgentTask(
-                    agent_name="BuildManagerAgent",
+                    agent_name=manager_name,
                     description=user_query,
-                    tools_needed=["CodingAgent", "ReviewAgent"],
-                    depends_on=[0] if decision.use_research else [],
+                    tools_needed=tools_by_manager.get(manager_name, []),
+                    depends_on=[0] if i > 0 else [],
                 )
             )
         return ExecutionPlan(
             original_request=user_query,
-            reasoning=f"Routing decision: {decision.reasoning}.",
+            reasoning=reasoning,
             tasks=tasks,
         )
+
+    # ----------------- Orchestration -----------------
 
     async def orchestrate(
         self,
@@ -85,41 +158,33 @@ class RootSupervisorAgent:
         *,
         pre_subtask: PreSubtaskHook | None = None,
     ) -> tuple[OrchestratorState, AgentResponse]:
-        """Run the full plan-execute-aggregate pipeline.
-
-        Args:
-            user_query: The user's request.
-            pre_subtask: Optional async hook (used by HITL) invoked
-                before each subtask. Returning False pauses execution.
-
-        Returns:
-            A tuple of `(state, response)`. When execution pauses for HITL
-            the response will reflect partial progress and the state's
-            timeline will end at the pause point.
-        """
+        """Run plan → execute → aggregate."""
         state = OrchestratorState(user_query=user_query, status="planning")
         self.state = state
 
-        plan = self.plan(user_query)
+        plan = await self.plan(user_query)
         state.plan = plan
         state.add_step(
             agent_name=self.name,
             kind=ExecutionStepKind.TASK_DECOMPOSITION,
-            message=f"Plan created with {len(plan.tasks)} task(s): "
-            + ", ".join(t.agent_name for t in plan.tasks),
+            message=(
+                f"Plan created with {len(plan.tasks)} task(s): "
+                + ", ".join(t.agent_name for t in plan.tasks)
+            ),
             payload={"reasoning": plan.reasoning},
         )
 
         state.status = "running"
         responses = await self.engine.run(plan, state, pre_subtask=pre_subtask)
 
-        # If the engine paused before completion, surface that and return.
         if len(responses) < len(plan.tasks):
             state.status = "paused"
             return state, AgentResponse(
                 agent_name=self.name,
                 content="Execution paused for review.",
-                data={"partial_responses": [r.model_dump(mode="json") for r in responses]},
+                data={
+                    "partial_responses": [r.model_dump(mode="json") for r in responses]
+                },
             )
 
         final_text = await self._aggregate(user_query, responses)
@@ -132,7 +197,7 @@ class RootSupervisorAgent:
             payload={"final_answer_preview": final_text[:200]},
         )
 
-        merged_data: dict = {}
+        merged_data: dict[str, Any] = {}
         for r in responses:
             merged_data.update(r.data)
         return state, AgentResponse(
@@ -148,10 +213,7 @@ class RootSupervisorAgent:
         *,
         pre_subtask: PreSubtaskHook | None = None,
     ) -> tuple[OrchestratorState, AgentResponse]:
-        """Resume a paused orchestration from `start_index`.
-
-        Used by the HITL flow after the user approves a paused subtask.
-        """
+        """Resume a paused orchestration from `start_index` (HITL path)."""
         assert state.plan is not None, "Cannot resume without a plan"
         self.state = state
         state.status = "running"
@@ -160,10 +222,11 @@ class RootSupervisorAgent:
             state.plan, state, pre_subtask=pre_subtask, start_index=start_index
         )
 
-        completed_count = sum(1 for t in state.plan.tasks if t.is_success)
-        if completed_count < len(state.plan.tasks) and not all(
-            t.status.value in {"completed", "failed"} for t in state.plan.tasks
-        ):
+        unfinished = [
+            t for t in state.plan.tasks
+            if t.status.value not in {"completed", "failed"}
+        ]
+        if unfinished:
             state.status = "paused"
             return state, AgentResponse(
                 agent_name=self.name,
@@ -171,7 +234,6 @@ class RootSupervisorAgent:
                 data={},
             )
 
-        # Aggregate over ALL completed task results, not just this resume batch.
         all_responses: list[AgentResponse] = []
         for task in state.plan.tasks:
             if task.is_success and isinstance(task.result, dict):
@@ -187,7 +249,7 @@ class RootSupervisorAgent:
             payload={"final_answer_preview": final_text[:200]},
         )
 
-        merged_data: dict = {}
+        merged_data: dict[str, Any] = {}
         for r in all_responses:
             merged_data.update(r.data)
         return state, AgentResponse(
@@ -196,25 +258,20 @@ class RootSupervisorAgent:
             data=merged_data,
         )
 
-    async def _aggregate(self, user_query: str, responses: list[AgentResponse]) -> str:
+    # ----------------- Aggregation -----------------
+
+    async def _aggregate(
+        self, user_query: str, responses: list[AgentResponse]
+    ) -> str:
         """Combine manager responses into a single user-facing answer."""
         if not responses:
             return "No subtasks were executed."
 
         if self.llm.enabled:
-            joined = "\n\n".join(
-                f"### {r.agent_name}\n{r.content}" for r in responses if r.content
-            )
-            prompt = (
-                f"User query: {user_query}\n\n"
-                f"Manager outputs:\n{joined}\n\n"
-                "Write a concise, natural answer for the user, combining "
-                "the outputs without mentioning the agent names."
-            )
-            return await self.llm.complete(
-                prompt,
-                system="You synthesize multi-agent results into a clean answer.",
-            )
+            try:
+                return await self._llm_aggregate(user_query, responses)
+            except Exception as e:
+                logger.warning("LLM aggregator failed, falling back: %s", e)
 
         parts: list[str] = []
         for r in responses:
@@ -225,3 +282,28 @@ class RootSupervisorAgent:
             else:
                 parts.append(r.content)
         return "\n\n".join(parts)
+
+    async def _llm_aggregate(
+        self, user_query: str, responses: list[AgentResponse]
+    ) -> str:
+        from openai import AsyncOpenAI
+
+        joined = "\n\n".join(
+            f"### {r.agent_name}\n{r.content}" for r in responses if r.content
+        )
+        prompt = (
+            f"User query: {user_query}\n\n"
+            f"Manager outputs:\n{joined}\n\n"
+            "Write a concise, natural answer for the user. Do not mention "
+            "agent names or routing decisions."
+        )
+        client = AsyncOpenAI()
+        response = await client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": _AGGREGATOR_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        return response.choices[0].message.content or ""

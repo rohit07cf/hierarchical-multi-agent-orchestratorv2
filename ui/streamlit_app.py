@@ -29,7 +29,9 @@ from ui.components import (
 )
 from ui.visualizations import (
     render_agent_state,
+    render_agent_traces_for_subtasks,
     render_agent_tree,
+    render_llm_mode_banner,
     render_reasoning_panel,
     render_subtask_table,
 )
@@ -167,6 +169,12 @@ def render_main_content(model: str) -> None:
         with st.expander("Subtask Results", expanded=False):
             render_subtask_table(latest.subtasks)
 
+        # Per-agent reasoning traces — reasoning + selected/skipped tools
+        # + tool invocations + final response, including nested worker
+        # traces for managers.
+        with st.expander("Agent Reasoning Traces", expanded=False):
+            render_agent_traces_for_subtasks(latest.subtasks)
+
     # Streaming output
     if st.session_state["streaming_steps"]:
         with st.expander("Streaming Log", expanded=False):
@@ -245,9 +253,11 @@ def run_app() -> None:
 
     st.title("Hierarchical Multi-Agent Orchestrator")
     st.caption(
-        "Supervisor-driven task decomposition with HITL support, "
-        "real-time streaming, and Temporal workflow durability"
+        "LLM-powered reasoning agents (RootSupervisor → Managers → "
+        "Workers) with HITL support, per-agent reasoning traces, and a "
+        "deterministic offline mock when no API key is set."
     )
+    render_llm_mode_banner()
 
     model = render_sidebar()
 

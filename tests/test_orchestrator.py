@@ -60,6 +60,47 @@ async def test_execution_timeline_records_expected_step_kinds() -> None:
 
 
 @pytest.mark.asyncio
+async def test_subtask_complete_steps_carry_agent_trace() -> None:
+    """Every manager invocation must surface its reasoning trace on the timeline."""
+    supervisor = RootSupervisorAgent()
+    state, _ = await supervisor.orchestrate("Build a FastAPI endpoint.")
+    completed_steps = [
+        s for s in state.steps if s.kind == ExecutionStepKind.SUBTASK_COMPLETE
+    ]
+    assert completed_steps, "expected at least one subtask_complete step"
+    for step in completed_steps:
+        trace = step.payload.get("trace")
+        assert trace is not None, (
+            f"subtask_complete for {step.agent_name} missing reasoning trace"
+        )
+        assert trace["agent_name"] == step.agent_name
+        # Manager trace should expose nested worker traces too.
+        # (BuildManagerAgent → CodingAgent / ReviewAgent)
+        worker_traces = step.payload.get("trace", {}).get("tool_invocations", [])
+        assert isinstance(worker_traces, list)
+
+
+@pytest.mark.asyncio
+async def test_philosophical_input_runs_summarizer_only_end_to_end() -> None:
+    """The 'meaning of life' query must not invoke BuildManager OR RAGAgent."""
+    supervisor = RootSupervisorAgent()
+    state, _ = await supervisor.orchestrate(
+        "The meaning of life is to live, to understand, and to create "
+        "something meaningful to share with others."
+    )
+    assert state.plan is not None
+    manager_names = [t.agent_name for t in state.plan.tasks]
+    assert manager_names == ["ResearchManagerAgent"]
+
+    research_task = state.plan.tasks[0]
+    research_trace = research_task.result.get("trace", {})
+    assert "call_summarizer_agent" in research_trace["selected_tools"]
+    assert "call_rag_agent" not in research_trace["selected_tools"], (
+        "RAGAgent must not be invoked for pasted philosophical text"
+    )
+
+
+@pytest.mark.asyncio
 async def test_pre_subtask_hook_can_pause_execution() -> None:
     supervisor = RootSupervisorAgent()
     call_count = {"n": 0}
