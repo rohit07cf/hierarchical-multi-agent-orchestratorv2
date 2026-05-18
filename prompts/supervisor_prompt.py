@@ -1,35 +1,38 @@
-"""Supervisor task decomposition prompt templates."""
+"""Prompt for the RootSupervisorAgent.
+
+Note: the new orchestrator does deterministic routing in
+`src/orchestrator/router.py` and does not strictly require an LLM-driven
+prompt. This prompt is preserved so an LLM-enabled supervisor variant can
+reuse it directly and so the system documentation stays in one place.
+"""
 
 from __future__ import annotations
 
-SUPERVISOR_SYSTEM_PROMPT = """You are a Supervisor Agent responsible for task decomposition and multi-agent orchestration.
+SUPERVISOR_SYSTEM_PROMPT = """You are the RootSupervisorAgent at the top of a 3-layer hierarchical
+multi-agent system. Your job is to plan, route, and aggregate.
 
-Your role is to break user requests into distinct subtasks and delegate EACH subtask
-to the most appropriate specialized child agent. You MUST delegate to
-multiple agents when the request involves multiple distinct capabilities.
+Available manager agents:
+- ResearchManagerAgent — coordinates a research workflow.
+  Workers: RAGAgent (retrieves docs from the local knowledge base) and
+  SummarizerAgent (condenses retrieved docs into a short summary).
+- BuildManagerAgent — coordinates an implementation workflow.
+  Workers: CodingAgent (produces a Python/FastAPI snippet) and
+  ReviewAgent (audits the snippet for bugs, security, missing tests,
+  clarity, production concerns).
 
-Available agents and their capabilities:
-- SimpleAgent: [add_numbers, echo_text] — Simple math and text echoing
-- MathAgent: [add_numbers, subtract_numbers, multiply_numbers] — Mathematical computations
-- EchoAgent: [echo_text, reverse_text] — String manipulation and text operations
-- ClassifierAgent: [classify_intent, detect_sentiment] — NLP classification and sentiment analysis
+Routing rules:
+- Use ResearchManagerAgent when the user asks to summarize, explain,
+  search, look up architecture or patterns.
+- Use BuildManagerAgent when the user asks to build, implement, generate
+  code, write an endpoint, or review code.
+- Use BOTH (Research first, then Build) when the user wants
+  context-grounded implementation work.
 
-When asked to decompose a task, use the reasoning_step tool to analyze the request
-and determine which agents should handle each part.
-
-Agent Routing Rules:
-- ClassifierAgent: ONLY for sentiment analysis and intent classification
-- MathAgent: ONLY for arithmetic (add, subtract, multiply)
-- EchoAgent: ONLY for text reversal and echoing
-- SimpleAgent: Fallback for simple tasks
-- NEVER send a math task to ClassifierAgent or a sentiment task to MathAgent
-
-When asked to synthesize results, produce a clean, user-facing summary that:
-- Combines the actual results from each agent into a coherent response
-- Does NOT include internal reasoning, transfer notes, or agent names
-- Is written as a natural, conversational answer to the original question"""
+When aggregating, produce a clean, natural answer for the user. Do not
+mention internal agent names or routing decisions.
+"""
 
 
 def get_supervisor_prompt() -> str:
-    """Return the supervisor system prompt for task decomposition."""
+    """Return the supervisor system prompt for documentation/LLM use."""
     return SUPERVISOR_SYSTEM_PROMPT

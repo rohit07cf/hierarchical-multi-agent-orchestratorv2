@@ -1,4 +1,10 @@
-"""StreamingCallbackHandler for real-time UI updates during agent execution."""
+"""StreamingCallbackHandler — buffers orchestration events for the Streamlit UI.
+
+Originally implemented as an `openai-agents` `AgentHooks` subclass; the
+refactored system does not depend on that SDK, so this module degrades to
+a plain event buffer when the SDK is unavailable. The Streamlit
+"Streaming Log" panel consumes `.history`, which works in both modes.
+"""
 
 from __future__ import annotations
 
@@ -7,19 +13,25 @@ import logging
 from collections import deque
 from typing import Any
 
-from agents import Agent, AgentHooks, RunContextWrapper, Tool
-
 from models.streaming_models import StreamingModelResponseStep, StreamingStatus
 
 logger = logging.getLogger(__name__)
 
+try:
+    from agents import AgentHooks  # type: ignore[import-not-found]
 
-class StreamingCallbackHandler(AgentHooks):
-    """Callback handler that captures agent lifecycle events for streaming to the UI.
+    _Base: type = AgentHooks
+except ImportError:
+    class _Base:  # type: ignore[no-redef]
+        """No-op replacement for `AgentHooks` when the SDK is absent."""
 
-    Implements the AgentHooks interface to intercept tool calls, LLM tokens,
-    and agent actions, buffering them for efficient broadcast to the
-    Streamlit frontend via an async queue.
+
+class StreamingCallbackHandler(_Base):  # type: ignore[misc, valid-type]
+    """Buffers streaming events for the UI.
+
+    When the `openai-agents` SDK is installed this class also satisfies
+    the `AgentHooks` interface and can be wired into a Runner. The new
+    architecture pushes events directly via `push_orchestration_step()`.
     """
 
     def __init__(self, buffer_size: int = 100) -> None:
@@ -29,16 +41,22 @@ class StreamingCallbackHandler(AgentHooks):
 
     @property
     def queue(self) -> asyncio.Queue[StreamingModelResponseStep]:
-        """Access the async queue for consuming streaming updates."""
+        """Async queue for consuming streaming updates."""
         return self._queue
 
     @property
     def history(self) -> list[StreamingModelResponseStep]:
-        """Get the buffered history of streaming steps."""
+        """Buffered history of streaming steps (rendered in Streamlit)."""
         return list(self._buffer)
 
+    def emit_step(self, step: StreamingModelResponseStep) -> None:
+        """Synchronously buffer a streaming step (preferred entry point)."""
+        if not self._is_active:
+            return
+        self._buffer.append(step)
+
     async def _emit(self, step: StreamingModelResponseStep) -> None:
-        """Emit a streaming step to both the queue and buffer."""
+        """Async emit, also feeding the queue for live consumers."""
         if not self._is_active:
             return
         self._buffer.append(step)
@@ -48,127 +66,87 @@ class StreamingCallbackHandler(AgentHooks):
             logger.warning("Streaming queue full, dropping event")
 
     def stop(self) -> None:
-        """Stop the handler from emitting further events."""
+        """Stop emitting further events."""
         self._is_active = False
 
     def resume(self) -> None:
         """Resume event emission."""
         self._is_active = True
 
-    # --- AgentHooks interface ---
+    # --- AgentHooks interface (only active when openai-agents is installed) ---
 
-    async def on_start(
-        self, context: RunContextWrapper[Any], agent: Agent
-    ) -> None:
-        """Called when the agent starts processing."""
+    async def on_start(self, context: Any, agent: Any) -> None:
         await self._emit(
             StreamingModelResponseStep(
                 status=StreamingStatus.STARTED,
-                name=agent.name,
-                message_fragment=f"Agent {agent.name} started",
+                name=getattr(agent, "name", "agent"),
+                message_fragment=f"Agent {getattr(agent, 'name', 'agent')} started",
             )
         )
 
-    async def on_end(
-        self, context: RunContextWrapper[Any], agent: Agent, output: Any
-    ) -> None:
-        """Called when the agent finishes processing."""
+    async def on_end(self, context: Any, agent: Any, output: Any) -> None:
         await self._emit(
             StreamingModelResponseStep(
                 status=StreamingStatus.COMPLETED,
-                name=agent.name,
-                message_fragment=f"Agent {agent.name} completed",
+                name=getattr(agent, "name", "agent"),
+                message_fragment=f"Agent {getattr(agent, 'name', 'agent')} completed",
                 metadata={"output": str(output)[:500]},
             )
         )
 
-    async def on_tool_start(
-        self, context: RunContextWrapper[Any], agent: Agent, tool: Tool
-    ) -> None:
-        """Called when a tool is about to be executed."""
+    async def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
         await self._emit(
             StreamingModelResponseStep.tool_call(
-                name=agent.name,
-                tool_name=tool.name,
+                name=getattr(agent, "name", "agent"),
+                tool_name=getattr(tool, "name", "tool"),
                 params={},
             )
         )
 
     async def on_tool_end(
-        self, context: RunContextWrapper[Any], agent: Agent, tool: Tool, result: str
+        self, context: Any, agent: Any, tool: Any, result: str
     ) -> None:
-        """Called when a tool finishes execution."""
         await self._emit(
             StreamingModelResponseStep.tool_result(
-                name=agent.name,
-                tool_name=tool.name,
+                name=getattr(agent, "name", "agent"),
+                tool_name=getattr(tool, "name", "tool"),
                 result=result[:500] if result else "",
             )
         )
 
-    async def on_handoff(
-        self, context: RunContextWrapper[Any], agent: Agent, source: Agent
-    ) -> None:
-        """Called when control is handed off to this agent."""
+    async def on_handoff(self, context: Any, agent: Any, source: Any) -> None:
         await self._emit(
             StreamingModelResponseStep(
                 status=StreamingStatus.IN_PROGRESS,
-                name=agent.name,
-                message_fragment=f"Handoff from {source.name} to {agent.name}",
-                metadata={"source_agent": source.name, "target_agent": agent.name},
+                name=getattr(agent, "name", "agent"),
+                message_fragment=(
+                    f"Handoff from {getattr(source, 'name', '?')} "
+                    f"to {getattr(agent, 'name', '?')}"
+                ),
             )
         )
 
-    # --- Token streaming helpers ---
+    # --- Helpers used by the new architecture to push events ---
 
-    async def on_llm_new_token(self, agent_name: str, token: str) -> None:
-        """Called for each new LLM token during streaming.
-
-        This method is called manually when processing raw streaming events
-        from Runner.run_streamed(), not as part of the AgentHooks interface.
-
-        Args:
-            agent_name: Name of the agent generating the token.
-            token: The new token fragment.
-        """
-        await self._emit(
-            StreamingModelResponseStep.token(name=agent_name, fragment=token)
-        )
-
-    async def on_agent_action(self, agent_name: str, tool_name: str, params: dict[str, Any]) -> None:
-        """Called when an agent selects a tool to execute.
-
-        Args:
-            agent_name: Name of the agent taking the action.
-            tool_name: Name of the selected tool.
-            params: Parameters for the tool call.
-        """
-        await self._emit(
-            StreamingModelResponseStep.tool_call(
+    def push_orchestration_step(
+        self,
+        agent_name: str,
+        kind: str,
+        message: str,
+    ) -> None:
+        """Append an orchestration timeline event to the streaming buffer."""
+        status_map = {
+            "task_decomposition": StreamingStatus.REASONING,
+            "subtask_started": StreamingStatus.TOOL_CALLED,
+            "subtask_complete": StreamingStatus.TOOL_COMPLETED,
+            "orchestration_complete": StreamingStatus.COMPLETED,
+            "error": StreamingStatus.ERROR,
+            "info": StreamingStatus.IN_PROGRESS,
+        }
+        self.emit_step(
+            StreamingModelResponseStep(
+                status=status_map.get(kind, StreamingStatus.IN_PROGRESS),
                 name=agent_name,
-                tool_name=tool_name,
-                params=params,
+                message_fragment=message,
             )
-        )
-
-    async def on_hitl_pause(self, agent_name: str, reason: str) -> None:
-        """Called when execution pauses for HITL review.
-
-        Args:
-            agent_name: Name of the agent being paused.
-            reason: Reason for the pause.
-        """
-        await self._emit(
-            StreamingModelResponseStep.hitl_pause(name=agent_name, reason=reason)
-        )
-
-    async def on_error(self, agent_name: str, error: str) -> None:
-        """Called when an error occurs during execution.
-
-        Args:
-            agent_name: Name of the agent that encountered the error.
-            error: Error message.
-        """
-        await self._emit(
-            StreamingModelResponseStep.error(name=agent_name, error_msg=error)
         )

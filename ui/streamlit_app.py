@@ -65,7 +65,9 @@ def get_supervisor(model: str) -> SupervisorAgent:
         SupervisorAgent instance.
     """
     if st.session_state["supervisor"] is None or st.session_state.get("current_model") != model:
-        st.session_state["supervisor"] = SupervisorAgent(model=model)
+        supervisor = SupervisorAgent(model=model)
+        supervisor.streaming_handler = st.session_state["streaming_handler"]
+        st.session_state["supervisor"] = supervisor
         st.session_state["current_model"] = model
     return st.session_state["supervisor"]
 
