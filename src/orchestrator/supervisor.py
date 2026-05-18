@@ -1,15 +1,21 @@
-"""RootSupervisorAgent — LLM-driven planner at the top of the hierarchy.
+"""RootSupervisorAgent — LLM-driven dynamic router at the top of the hierarchy.
 
-The supervisor uses the LLM to:
+The supervisor uses the LLM **turn-by-turn** to decide which manager to
+invoke next. Each turn:
 
-1. Decide which managers (ResearchManagerAgent, BuildManagerAgent, or
-   both) to invoke for the given query.
-2. Aggregate manager outputs into a single user-facing answer.
+1. Pick the next manager (or stop) based on the user query plus the
+   responses produced so far.
+2. Execute that one manager.
+3. Loop until the LLM decides no further work is needed (or a safety
+   cap is hit).
 
-In mock mode the planner falls back to the deterministic `Router` (the
-same intent-based rules tested in `tests/test_routing.py`), so the
-orchestration shape stays correct offline. Real LLM mode replaces the
-router decision with a structured JSON plan from the model.
+A final LLM call aggregates the responses into a single user-facing
+answer.
+
+When `OPENAI_API_KEY` is unset, both the per-turn decision and the
+aggregation fall back to deterministic rules (the intent-based `Router`
+and a simple concatenation), so the orchestration shape stays correct
+offline.
 """
 
 from __future__ import annotations
@@ -22,7 +28,6 @@ from src.agents.base import ReasoningAgent
 from src.agents.build_manager import BuildManagerAgent
 from src.agents.research_manager import ResearchManagerAgent
 from src.llm.client import get_llm_client
-from src.models.requests import AgentRequest
 from src.models.responses import AgentResponse
 from src.models.state_models import (
     AgentTask,
@@ -38,16 +43,19 @@ logger = logging.getLogger(__name__)
 
 _PLANNER_SYSTEM_PROMPT = (
     "You are the RootSupervisorAgent at the top of a 3-layer hierarchical "
-    "multi-agent system. Two managers are available:\n"
+    "multi-agent system. On each turn you pick at most ONE manager to run "
+    "next, or finish if the user's request has been satisfied. Two "
+    "managers are available:\n"
     "- ResearchManagerAgent: coordinates retrieval + summarization.\n"
     "- BuildManagerAgent: coordinates code generation + review.\n\n"
-    "Pick which managers to invoke based on user intent:\n"
+    "Routing rules:\n"
     "- Reflective, philosophical, summarization, or rewriting requests → "
     "ResearchManagerAgent only.\n"
     "- Explicit code/implementation requests (build, implement, fastapi, "
     "redis, write code, etc.) → BuildManagerAgent.\n"
-    "- Both, in Research→Build order, only when the user explicitly asks "
-    "to combine the two."
+    "- Combined requests run Research first, then Build.\n"
+    "- Never invoke the same manager twice. Once both have produced "
+    "useful output, finish."
 )
 
 _AGGREGATOR_SYSTEM_PROMPT = (
@@ -57,11 +65,23 @@ _AGGREGATOR_SYSTEM_PROMPT = (
 )
 
 
+# Default tool hints carried on each `AgentTask`, surfaced in the UI.
+_TOOLS_BY_MANAGER: dict[str, list[str]] = {
+    "ResearchManagerAgent": ["RAGAgent", "SummarizerAgent"],
+    "BuildManagerAgent": ["CodingAgent", "ReviewAgent"],
+}
+
+
 class RootSupervisorAgent:
-    """Top-level supervisor — LLM-driven plan / route / aggregate."""
+    """Top-level supervisor — LLM-driven dynamic plan / route / aggregate."""
 
     name = "RootSupervisorAgent"
-    tools = ["llm_planner", "router_fallback", "execution_engine", "llm_aggregator"]
+    tools = ["llm_next_step", "router_fallback", "execution_engine", "llm_aggregator"]
+
+    # Safety cap on the dynamic routing loop. Each turn calls one
+    # manager, so this is also the maximum number of managers that can
+    # be invoked for a single user request.
+    MAX_TURNS = 6
 
     def __init__(self, model: str = "gpt-4.1-nano") -> None:
         self.model = model
@@ -77,23 +97,100 @@ class RootSupervisorAgent:
     # ----------------- Planning -----------------
 
     async def plan(self, user_query: str) -> ExecutionPlan:
-        """Build the execution plan. LLM-driven, deterministic mock fallback."""
+        """Initial plan — the LLM's first manager pick (or empty if none).
+
+        Used directly by the HITL bridge to show an upfront decomposition
+        preview. Subsequent managers are added dynamically during
+        `orchestrate()`.
+        """
+        manager_name, reasoning = await self._decide_next_manager(
+            user_query, prior=[]
+        )
+        managers = [manager_name] if manager_name else []
+        return self._build_plan(user_query, managers, reasoning)
+
+    def _build_plan(
+        self, user_query: str, managers: list[str], reasoning: str
+    ) -> ExecutionPlan:
+        """Wrap a manager list into an `ExecutionPlan` with the right tool hints."""
+        tasks: list[AgentTask] = []
+        for i, manager_name in enumerate(managers):
+            tasks.append(
+                AgentTask(
+                    agent_name=manager_name,
+                    description=user_query,
+                    tools_needed=_TOOLS_BY_MANAGER.get(manager_name, []),
+                    depends_on=[i - 1] if i > 0 else [],
+                )
+            )
+        return ExecutionPlan(
+            original_request=user_query,
+            reasoning=reasoning,
+            tasks=tasks,
+        )
+
+    # ----------------- Per-turn decision -----------------
+
+    async def _decide_next_manager(
+        self,
+        user_query: str,
+        prior: list[tuple[str, str]],
+    ) -> tuple[str | None, str]:
+        """Pick the next manager to invoke given the responses so far.
+
+        Returns `(manager_name, reasoning)` where `manager_name` is None
+        when the supervisor decides no further work is needed.
+        """
         if self.llm.enabled:
             try:
-                return await self._llm_plan(user_query)
+                return await self._llm_decide_next(user_query, prior)
             except Exception as e:
-                logger.warning("LLM planner failed, falling back to router: %s", e)
-        return self._router_plan(user_query)
+                logger.warning(
+                    "LLM next-step decision failed, using router fallback: %s", e
+                )
+        return self._router_decide_next(user_query, prior)
 
-    async def _llm_plan(self, user_query: str) -> ExecutionPlan:
-        """Ask the LLM directly to produce a manager list + reasoning."""
+    def _router_decide_next(
+        self, user_query: str, prior: list[tuple[str, str]]
+    ) -> tuple[str | None, str]:
+        """Deterministic next-step decision via the intent-based router."""
+        decision = self.router.decide(user_query)
+        already_ran = {name for name, _ in prior}
+        if decision.use_research and "ResearchManagerAgent" not in already_ran:
+            return (
+                "ResearchManagerAgent",
+                f"[mock-llm dynamic router] {decision.reasoning}",
+            )
+        if decision.use_build and "BuildManagerAgent" not in already_ran:
+            return (
+                "BuildManagerAgent",
+                f"[mock-llm dynamic router] {decision.reasoning}",
+            )
+        return None, "[mock-llm] All needed managers have run; finishing."
+
+    async def _llm_decide_next(
+        self, user_query: str, prior: list[tuple[str, str]]
+    ) -> tuple[str | None, str]:
+        """Ask the LLM which manager to call next (or null to finish)."""
         from openai import AsyncOpenAI
 
+        if prior:
+            history_block = "Managers that have already run:\n\n" + "\n\n".join(
+                f"### {name}\n{content[:600]}" for name, content in prior
+            )
+        else:
+            history_block = "No managers have run yet."
+
+        available_block = "\n".join(f"- {name}" for name in self.managers.keys())
+
         prompt = (
-            f"User query: {user_query}\n\n"
-            "Respond with JSON in this exact shape:\n"
-            '{"reasoning": "<one-paragraph rationale>", '
-            '"managers": ["ResearchManagerAgent" | "BuildManagerAgent", ...]}'
+            f"User query:\n{user_query}\n\n"
+            f"{history_block}\n\n"
+            f"Available managers:\n{available_block}\n\n"
+            "Decide which manager to invoke next, or finish if no further "
+            "work is needed. Respond with JSON in this exact shape:\n"
+            '{"reasoning": "<one-line rationale>", '
+            '"next_manager": "<manager name>" | null}'
         )
         client = AsyncOpenAI()
         response = await client.chat.completions.create(
@@ -107,48 +204,10 @@ class RootSupervisorAgent:
         )
         raw = response.choices[0].message.content or "{}"
         parsed = json.loads(raw)
-        managers = [
-            m for m in parsed.get("managers", []) if m in self.managers
-        ]
-        reasoning = parsed.get("reasoning", "")
-        return self._build_plan(user_query, managers, reasoning)
-
-    def _router_plan(self, user_query: str) -> ExecutionPlan:
-        """Deterministic plan via the intent-based router (mock-mode fallback)."""
-        decision = self.router.decide(user_query)
-        managers: list[str] = []
-        if decision.use_research:
-            managers.append("ResearchManagerAgent")
-        if decision.use_build:
-            managers.append("BuildManagerAgent")
-        reasoning = (
-            f"[mock-llm planner via deterministic router] {decision.reasoning}"
-        )
-        return self._build_plan(user_query, managers, reasoning)
-
-    def _build_plan(
-        self, user_query: str, managers: list[str], reasoning: str
-    ) -> ExecutionPlan:
-        """Wrap a manager list into an `ExecutionPlan` with the right tool hints."""
-        tools_by_manager = {
-            "ResearchManagerAgent": ["RAGAgent", "SummarizerAgent"],
-            "BuildManagerAgent": ["CodingAgent", "ReviewAgent"],
-        }
-        tasks: list[AgentTask] = []
-        for i, manager_name in enumerate(managers):
-            tasks.append(
-                AgentTask(
-                    agent_name=manager_name,
-                    description=user_query,
-                    tools_needed=tools_by_manager.get(manager_name, []),
-                    depends_on=[0] if i > 0 else [],
-                )
-            )
-        return ExecutionPlan(
-            original_request=user_query,
-            reasoning=reasoning,
-            tasks=tasks,
-        )
+        next_manager = parsed.get("next_manager")
+        if next_manager not in self.managers:
+            next_manager = None
+        return next_manager, parsed.get("reasoning", "")
 
     # ----------------- Orchestration -----------------
 
@@ -158,7 +217,7 @@ class RootSupervisorAgent:
         *,
         pre_subtask: PreSubtaskHook | None = None,
     ) -> tuple[OrchestratorState, AgentResponse]:
-        """Run plan → execute → aggregate."""
+        """Run the dynamic routing loop and aggregate the final answer."""
         state = OrchestratorState(user_query=user_query, status="planning")
         self.state = state
 
@@ -168,23 +227,74 @@ class RootSupervisorAgent:
             agent_name=self.name,
             kind=ExecutionStepKind.TASK_DECOMPOSITION,
             message=(
-                f"Plan created with {len(plan.tasks)} task(s): "
-                + ", ".join(t.agent_name for t in plan.tasks)
+                "Initial plan: "
+                + (
+                    ", ".join(t.agent_name for t in plan.tasks)
+                    if plan.tasks
+                    else "(empty — no managers selected yet)"
+                )
             ),
             payload={"reasoning": plan.reasoning},
         )
 
         state.status = "running"
-        responses = await self.engine.run(plan, state, pre_subtask=pre_subtask)
+        responses: list[AgentResponse] = []
+        accumulated_context: dict[str, Any] = {}
 
-        if len(responses) < len(plan.tasks):
-            state.status = "paused"
+        for idx in range(self.MAX_TURNS):
+            if idx >= len(plan.tasks):
+                manager_name, reasoning = await self._decide_next_manager(
+                    user_query,
+                    prior=[(r.agent_name, r.content) for r in responses],
+                )
+                if manager_name is None:
+                    break
+                plan.tasks.append(
+                    AgentTask(
+                        agent_name=manager_name,
+                        description=user_query,
+                        tools_needed=_TOOLS_BY_MANAGER.get(manager_name, []),
+                        depends_on=[idx - 1] if idx > 0 else [],
+                    )
+                )
+                state.add_step(
+                    agent_name=self.name,
+                    kind=ExecutionStepKind.TASK_DECOMPOSITION,
+                    message=f"Dynamic routing: next agent is {manager_name}",
+                    payload={"reasoning": reasoning},
+                )
+
+            task = plan.tasks[idx]
+
+            if pre_subtask is not None:
+                proceed = await pre_subtask(idx, task, state)
+                if not proceed:
+                    state.status = "paused"
+                    return state, AgentResponse(
+                        agent_name=self.name,
+                        content="Execution paused for review.",
+                        data={
+                            "partial_responses": [
+                                r.model_dump(mode="json") for r in responses
+                            ]
+                        },
+                    )
+
+            response = await self.engine.run_one_task(
+                task, state, accumulated_context
+            )
+            if response is None:
+                # Task errored — stop here; the engine has already
+                # recorded the error on the timeline.
+                break
+            responses.append(response)
+            accumulated_context.update(response.data)
+
+        if not responses:
+            state.final_answer = "No managers were invoked."
+            state.status = "completed"
             return state, AgentResponse(
-                agent_name=self.name,
-                content="Execution paused for review.",
-                data={
-                    "partial_responses": [r.model_dump(mode="json") for r in responses]
-                },
+                agent_name=self.name, content=state.final_answer
             )
 
         final_text = await self._aggregate(user_query, responses)
@@ -218,28 +328,62 @@ class RootSupervisorAgent:
         self.state = state
         state.status = "running"
 
-        responses = await self.engine.run(
-            state.plan, state, pre_subtask=pre_subtask, start_index=start_index
-        )
+        plan = state.plan
+        responses: list[AgentResponse] = []
+        accumulated_context: dict[str, Any] = {}
 
-        unfinished = [
-            t for t in state.plan.tasks
-            if t.status.value not in {"completed", "failed"}
-        ]
-        if unfinished:
-            state.status = "paused"
-            return state, AgentResponse(
-                agent_name=self.name,
-                content="Execution paused again for review.",
-                data={},
+        # Replay previously-completed tasks into the response list so the
+        # dynamic loop has the full history when deciding what to do next.
+        for prior_task in plan.tasks[:start_index]:
+            if prior_task.is_success and isinstance(prior_task.result, dict):
+                prior_response = AgentResponse.model_validate(prior_task.result)
+                responses.append(prior_response)
+                accumulated_context.update(prior_response.data)
+
+        for idx in range(start_index, start_index + self.MAX_TURNS):
+            if idx >= len(plan.tasks):
+                manager_name, reasoning = await self._decide_next_manager(
+                    state.user_query,
+                    prior=[(r.agent_name, r.content) for r in responses],
+                )
+                if manager_name is None:
+                    break
+                plan.tasks.append(
+                    AgentTask(
+                        agent_name=manager_name,
+                        description=state.user_query,
+                        tools_needed=_TOOLS_BY_MANAGER.get(manager_name, []),
+                        depends_on=[idx - 1] if idx > 0 else [],
+                    )
+                )
+                state.add_step(
+                    agent_name=self.name,
+                    kind=ExecutionStepKind.TASK_DECOMPOSITION,
+                    message=f"Dynamic routing: next agent is {manager_name}",
+                    payload={"reasoning": reasoning},
+                )
+
+            task = plan.tasks[idx]
+
+            if pre_subtask is not None:
+                proceed = await pre_subtask(idx, task, state)
+                if not proceed:
+                    state.status = "paused"
+                    return state, AgentResponse(
+                        agent_name=self.name,
+                        content="Execution paused again for review.",
+                        data={},
+                    )
+
+            response = await self.engine.run_one_task(
+                task, state, accumulated_context
             )
+            if response is None:
+                break
+            responses.append(response)
+            accumulated_context.update(response.data)
 
-        all_responses: list[AgentResponse] = []
-        for task in state.plan.tasks:
-            if task.is_success and isinstance(task.result, dict):
-                all_responses.append(AgentResponse.model_validate(task.result))
-
-        final_text = await self._aggregate(state.user_query, all_responses)
+        final_text = await self._aggregate(state.user_query, responses)
         state.final_answer = final_text
         state.status = "completed"
         state.add_step(
@@ -250,7 +394,7 @@ class RootSupervisorAgent:
         )
 
         merged_data: dict[str, Any] = {}
-        for r in all_responses:
+        for r in responses:
             merged_data.update(r.data)
         return state, AgentResponse(
             agent_name=self.name,
