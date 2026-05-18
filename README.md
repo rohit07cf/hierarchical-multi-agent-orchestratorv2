@@ -1,28 +1,37 @@
 # Hierarchical Multi-Agent Orchestrator
 
 A production-inspired, recruiter-friendly demonstration of hierarchical
-multi-agent orchestration. A `RootSupervisorAgent` decomposes user
-queries, routes work to specialized **manager agents**, and the managers
-delegate the actual work to focused **worker agents**. Every step is
-recorded on an observable execution timeline that the Streamlit UI
-renders live, with full HITL (human-in-the-loop) support.
+multi-agent orchestration with **LLM-powered reasoning agents**. A
+`RootSupervisorAgent` decomposes user queries, routes work to
+specialized **manager agents**, and the managers delegate to focused
+**worker agents**. Each agent reasons over its inputs, decides which
+tools to call (and which to skip), and synthesizes its own response.
+Every decision is captured on an observable execution timeline that the
+Streamlit UI renders live, with full HITL (human-in-the-loop) support.
 
-The project is intentionally **lightweight**: it runs offline (no API key
-required), but transparently uses the OpenAI API when `OPENAI_API_KEY` is
-set.
+The project switches between two LLM modes automatically:
+
+- **Real mode** (when `OPENAI_API_KEY` is set) — agents reason via
+  OpenAI Chat Completions with structured JSON outputs.
+- **Mock mode** (no API key) — agents still emit reasoning traces and
+  invoke real deterministic tools, but synthesis is a clearly-labelled
+  `[mock-llm]` placeholder. The UI shows a banner indicating the mode.
 
 ## Recruiter-friendly summary
 
 - **3-layer hierarchical orchestration** — supervisor → managers →
   workers — modelled after real production systems.
-- **Structured Pydantic models** for every request, response, plan, and
-  state transition.
-- **Deterministic routing** that is testable, reproducible, and easy to
-  explain in an interview.
+- **LLM-powered reasoning agents**: every agent picks its own tools
+  (function-calling style) and produces a trace the UI renders.
+- **Structured Pydantic models** for every request, response, plan,
+  state transition, and reasoning trace.
+- **Intent-based routing**: BuildManager only fires on explicit code
+  intent; reflective/philosophical text routes to SummarizerAgent only.
 - **Local RAG over a small markdown knowledge base** with a hand-rolled
   retriever — no vector DB dependency.
-- **Code generation + automated review** chain with a heuristic review
-  tool (security, error handling, test coverage, clarity).
+- **Code generation + automated review** as a default quality gate,
+  split across `code_review_tool`, `security_review_tool`, and
+  `test_gap_tool`.
 - **Streamlit UI** with reasoning panel, subtask table, state inspector,
   execution timeline, agent hierarchy visualization, and HITL controls.
 - **Offline mock LLM** so the project demos cleanly without paid APIs.
@@ -57,29 +66,62 @@ graph TD
 
 ### Agent responsibilities
 
-| Layer | Agent                  | Responsibility                                                                 |
-|-------|------------------------|--------------------------------------------------------------------------------|
-| 1     | `RootSupervisorAgent`  | Plan, route, aggregate; owns the orchestration state and timeline.             |
-| 2     | `ResearchManagerAgent` | Coordinate the retrieval + summarization chain.                                |
-| 2     | `BuildManagerAgent`    | Coordinate the code-generation + review chain.                                 |
-| 3     | `RAGAgent`             | Retrieve relevant docs from the local markdown knowledge base.                 |
-| 3     | `SummarizerAgent`      | Condense retrieved docs into a 2-3 sentence context summary.                   |
-| 3     | `CodingAgent`          | Produce a focused Python/FastAPI snippet.                                      |
-| 3     | `ReviewAgent`          | Audit generated code for bugs, security, missing tests, clarity, production.  |
+Every agent in the table is an **LLM-powered reasoning agent** built on
+the `ReasoningAgent` base class — it reasons, picks tools, executes,
+and synthesizes. The "Tools" column is the function-calling-style
+toolset each agent's LLM can choose from.
+
+| Layer | Agent                  | Responsibility                                                                | Tools                                                          |
+|-------|------------------------|-------------------------------------------------------------------------------|----------------------------------------------------------------|
+| 1     | `RootSupervisorAgent`  | LLM plans / routes to managers; aggregates final response.                    | `llm_planner`, `router_fallback`, `llm_aggregator`             |
+| 2     | `ResearchManagerAgent` | LLM decides whether to call RAG, Summarizer, or both.                         | `call_rag_agent`, `call_summarizer_agent`                      |
+| 2     | `BuildManagerAgent`    | LLM decides whether to call CodingAgent, ReviewAgent, or both. Review is the default quality gate. | `call_coding_agent`, `call_review_agent`                       |
+| 3     | `RAGAgent`             | LLM picks `simple_retriever` and/or `load_knowledge_base`.                    | `simple_retriever`, `load_knowledge_base`                      |
+| 3     | `SummarizerAgent`      | LLM synthesizes a 2-3 sentence summary directly (no external tools).          | _(none — pure synthesis)_                                      |
+| 3     | `CodingAgent`          | LLM picks among template, code generation, and file context tools.            | `code_generation_tool`, `template_loader`, `file_context_tool` |
+| 3     | `ReviewAgent`          | LLM picks among general, security, and test-coverage review tools.            | `code_review_tool`, `security_review_tool`, `test_gap_tool`    |
 
 ### Orchestration flow
 
 1. The user submits a query through Streamlit (or the CLI).
-2. The supervisor's `Router` deterministically picks the needed managers
-   based on keyword signals — research, build, or both.
+2. `RootSupervisorAgent.plan()` calls the LLM to pick which managers
+   should run. In mock mode it falls back to the deterministic
+   intent-based `Router` (`src/orchestrator/router.py`), which also
+   serves as the LLM's reference policy.
 3. The supervisor builds an `ExecutionPlan` (a list of `AgentTask`s).
 4. The `ExecutionEngine` runs each task sequentially, recording an
-   `ExecutionStep` on the `OrchestratorState` for every transition.
-5. Each manager invokes its workers in order, passing structured context
-   forward (retrieved documents become the CodingAgent's grounding).
-6. The supervisor aggregates the final user-facing answer.
-7. Every event is mirrored into the Streamlit "Execution Timeline" and
-   "Streaming Log" panels.
+   `ExecutionStep` on the `OrchestratorState` for every transition and
+   attaching the agent's full reasoning trace to the
+   `subtask_complete` payload.
+5. Each manager's LLM reasons over the request, picks which workers
+   to call (e.g. ResearchManager may skip RAGAgent for pasted prose),
+   and the workers in turn reason about their own tools.
+6. The supervisor aggregates manager outputs into the user-facing
+   answer via another LLM call.
+7. Every event — supervisor plan, manager reasoning, worker reasoning,
+   each tool invocation — is mirrored into the Streamlit "Execution
+   Timeline", "Agent Reasoning Traces", and "Streaming Log" panels.
+
+### Per-agent reasoning trace
+
+Each agent emits an `AgentTrace` containing:
+
+- `reasoning` — the LLM's chain-of-thought summary.
+- `available_tools` — every tool the agent could have called.
+- `selected_tools` — the tools it actually invoked, with rationale.
+- `skipped_tools` — tools it considered but didn't need.
+- `tool_invocations` — for each call: arguments, rationale, success,
+  result preview.
+- `final_response` — what the agent returned to its caller.
+
+Example trace from the "meaning of life" demo query:
+
+```
+[ResearchManagerAgent] selected=[call_summarizer_agent] skipped=[call_rag_agent]
+  reasoning: Long pasted text without lookup intent — summarizing directly.
+  └─ [SummarizerAgent] selected=[] skipped=[]
+       reasoning: No retrieved documents; will summarize the pasted text directly.
+```
 
 ## Streamlit UI
 
@@ -92,9 +134,15 @@ feature from the previous version:
 
 - Conversation chat
 - Manual / Auto / HITL execution modes
-- **Reasoning & Decomposition** panel — shows the routing reasoning,
-  planned tasks, and tools needed.
+- **Reasoning & Decomposition** panel — shows the supervisor's plan,
+  reasoning, planned tasks, and tools needed per task.
 - **Subtask Results** panel — table of agent outcomes.
+- **Agent Reasoning Traces** panel — per-agent expandable cards
+  showing reasoning, selected vs. skipped tools, each tool
+  invocation's rationale + result preview, and nested worker traces
+  for manager agents.
+- **LLM mode banner** — top-of-page indicator showing real vs. mock
+  mode.
 - **State Inspector (Debug)** — exposes `state_id`, `iteration_count`,
   every `ExecutionStep`, the `tool_path`, and the raw JSON output of the
   final orchestration result.
@@ -231,13 +279,19 @@ src/
     coding_agent.py
     review_agent.py
   tools/
-    document_loader.py
-    simple_retriever.py
-    code_review_tool.py
+    document_loader.py        # loads knowledge_base/*.md
+    simple_retriever.py       # token-overlap retriever
+    code_generation_tool.py   # boilerplate skeletons
+    template_loader.py        # named code templates
+    file_context_tool.py      # find related project files
+    code_review_tool.py       # general bugs/clarity review
+    security_review_tool.py   # secrets + unsafe-call scan
+    test_gap_tool.py          # missing-test detection
   models/
     requests.py            # AgentRequest
     responses.py           # AgentResponse, ReviewResult, ReviewFinding
     state_models.py        # OrchestratorState, ExecutionPlan, AgentTask, ExecutionStep
+    trace.py               # AgentTrace, AgentReasoning, ToolDecision, ToolInvocation, ToolSpec, LLMMode
   llm/
     client.py              # OpenAI client with deterministic mock fallback
   examples/

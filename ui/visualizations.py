@@ -127,3 +127,100 @@ def render_reasoning_panel(output: SupervisorOutput) -> None:
             for i, sub in enumerate(output.decomposition.subtasks, 1):
                 tools = ", ".join(sub.tools_needed) if sub.tools_needed else "auto"
                 st.text(f"  {i}. [{sub.agent_name}] {sub.description} (tools: {tools})")
+
+
+def render_llm_mode_banner() -> None:
+    """Show a banner indicating whether agents run in real or mock LLM mode."""
+    import os
+
+    if os.environ.get("OPENAI_API_KEY"):
+        st.success("LLM mode: **real** (OPENAI_API_KEY set)")
+    else:
+        st.warning(
+            "LLM mode: **mock** — agents emit reasoning traces and run "
+            "deterministic tools, but synthesis is a labelled placeholder. "
+            "Set `OPENAI_API_KEY` for real natural-language reasoning."
+        )
+
+
+def render_agent_trace(trace: dict[str, Any]) -> None:
+    """Render a single agent's reasoning trace.
+
+    `trace` is the serialized `AgentTrace` dict produced by a
+    `ReasoningAgent`. Shows the reasoning text, which tools were selected
+    or skipped, each tool invocation's rationale + preview, and the
+    final response.
+    """
+    if not trace:
+        return
+
+    mode = trace.get("llm_mode", "?")
+    if mode == "mock":
+        st.caption(f"LLM mode: `{mode}` (offline placeholder)")
+    else:
+        st.caption(f"LLM mode: `{mode}`")
+
+    st.markdown(f"**Reasoning:** {trace.get('reasoning', '—')}")
+
+    selected = trace.get("selected_tools") or []
+    skipped = trace.get("skipped_tools") or []
+    available = trace.get("available_tools") or []
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("**Available tools**")
+        if available:
+            st.markdown("\n".join(f"- `{t}`" for t in available))
+        else:
+            st.text("none")
+    with col2:
+        st.markdown("**Selected**")
+        if selected:
+            st.markdown("\n".join(f"- ✅ `{t}`" for t in selected))
+        else:
+            st.text("none")
+    with col3:
+        st.markdown("**Skipped**")
+        if skipped:
+            st.markdown("\n".join(f"- ⏭ `{t}`" for t in skipped))
+        else:
+            st.text("none")
+
+    invocations = trace.get("tool_invocations") or []
+    if invocations:
+        st.markdown("**Tool invocations**")
+        for inv in invocations:
+            status = "✅" if inv.get("success") else "❌"
+            with st.expander(f"{status} `{inv.get('tool_name', '?')}`"):
+                if inv.get("rationale"):
+                    st.markdown(f"_Rationale:_ {inv['rationale']}")
+                if inv.get("arguments"):
+                    st.markdown("_Arguments:_")
+                    st.json(inv["arguments"])
+                if inv.get("error"):
+                    st.error(inv["error"])
+                if inv.get("result_preview"):
+                    st.markdown("_Result preview:_")
+                    st.code(inv["result_preview"])
+
+
+def render_agent_traces_for_subtasks(subtasks: list[SubtaskResult]) -> None:
+    """Render one expandable trace block per subtask (manager + nested workers)."""
+    if not subtasks:
+        st.info("No agent traces yet.")
+        return
+
+    for sub in subtasks:
+        traces = [
+            tc["agent_trace"]
+            for tc in (sub.tool_calls or [])
+            if isinstance(tc, dict) and "agent_trace" in tc
+        ]
+        if not traces:
+            continue
+        with st.expander(f"🧠 {sub.agent_name} — agent reasoning trace", expanded=False):
+            for i, trace in enumerate(traces):
+                if i > 0:
+                    st.divider()
+                    st.caption(f"Nested worker: **{trace.get('agent_name', '?')}**")
+                render_agent_trace(trace)

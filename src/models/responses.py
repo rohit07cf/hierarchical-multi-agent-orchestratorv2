@@ -13,7 +13,9 @@ class AgentResponse(BaseModel):
 
     `content` is the user-visible answer. `data` carries structured
     artifacts (retrieved docs, code blocks, review findings) for the next
-    agent in the chain.
+    agent in the chain. `trace` (when present) is the AgentTrace dict
+    produced by a `ReasoningAgent` so the UI can render reasoning,
+    selected/skipped tools, and tool invocations.
     """
 
     agent_name: str = Field(description="Name of the agent producing the response")
@@ -21,6 +23,10 @@ class AgentResponse(BaseModel):
     data: dict[str, Any] = Field(
         default_factory=dict,
         description="Structured payload for downstream agents",
+    )
+    trace: dict[str, Any] | None = Field(
+        default=None,
+        description="Serialized AgentTrace — reasoning, tool decisions, invocations",
     )
     success: bool = Field(default=True, description="Whether the agent completed successfully")
     error: str | None = Field(default=None, description="Error message on failure")

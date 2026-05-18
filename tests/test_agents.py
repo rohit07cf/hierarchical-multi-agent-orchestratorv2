@@ -1,65 +1,57 @@
-"""Tests for individual worker agents and the tools they wrap."""
+"""Tests for individual reasoning agents and their underlying tools."""
 
 from __future__ import annotations
 
 import pytest
 
+from src.agents.build_manager import BuildManagerAgent
 from src.agents.coding_agent import CodingAgent
 from src.agents.rag_agent import RAGAgent
+from src.agents.research_manager import ResearchManagerAgent
 from src.agents.review_agent import ReviewAgent
 from src.agents.summarizer_agent import SummarizerAgent
 from src.models.requests import AgentRequest
+from src.models.trace import LLMMode
 from src.tools.code_review_tool import review_code
+from src.tools.security_review_tool import scan_security
 from src.tools.simple_retriever import SimpleRetriever
+from src.tools.template_loader import load_template
+from src.tools.test_gap_tool import scan_test_gaps
 
 
-@pytest.mark.asyncio
-async def test_rag_agent_returns_documents() -> None:
-    agent = RAGAgent()
-    response = await agent.handle(AgentRequest(query="hierarchical orchestration patterns"))
-    assert response.success
-    docs = response.data["documents"]
-    assert len(docs) > 0
-    assert all("name" in d and "text" in d for d in docs)
-
-
-@pytest.mark.asyncio
-async def test_summarizer_handles_empty_documents() -> None:
-    agent = SummarizerAgent()
-    response = await agent.handle(AgentRequest(query="anything", context={"documents": []}))
-    assert response.success
-    assert "nothing to summarize" in response.content.lower()
-
-
-@pytest.mark.asyncio
-async def test_coding_agent_returns_python_code() -> None:
-    agent = CodingAgent()
-    response = await agent.handle(AgentRequest(query="Build a FastAPI endpoint"))
-    assert response.data["language"] == "python"
-    assert "fastapi" in response.data["code"].lower()
-
-
-@pytest.mark.asyncio
-async def test_review_agent_formats_findings() -> None:
-    agent = ReviewAgent()
-    response = await agent.handle(
-        AgentRequest(query="review", context={"code": "def f(): return 1"})
-    )
-    assert "finding" in response.content.lower()
-    review = response.data["review"]
-    assert "approved" in review
-    assert "findings" in review
-
-
-def test_review_code_flags_hardcoded_secret() -> None:
-    result = review_code('API_KEY = "abc-123"\n')
-    assert result.has_blockers is True
-    assert any(f.category == "security" for f in result.findings)
+# ----------------- Tool primitives (deterministic) -----------------
 
 
 def test_review_code_warns_on_missing_error_handling() -> None:
     result = review_code("def f():\n    return 1\n")
     assert any(f.category == "bugs" for f in result.findings)
+
+
+def test_security_review_flags_hardcoded_secret() -> None:
+    result = scan_security('API_KEY = "abc-123-def"\n')
+    assert result["finding_count"] >= 1
+    assert any(f["category"] == "security" for f in result["findings"])
+
+
+def test_test_gap_tool_lists_untested_functions() -> None:
+    result = scan_test_gaps("def foo():\n    return 1\nclass Bar:\n    pass\n")
+    assert "foo" in result["functions"]
+    assert "Bar" in result["classes"]
+    assert result["has_tests"] is False
+    assert any(f["category"] == "tests" for f in result["findings"])
+
+
+def test_template_loader_returns_known_template() -> None:
+    result = load_template("fastapi_upload_endpoint")
+    assert result["found"] is True
+    assert "FastAPI" in result["body"]
+
+
+def test_template_loader_handles_unknown_template() -> None:
+    result = load_template("does_not_exist")
+    assert result["found"] is False
+    assert result["body"] == ""
+    assert isinstance(result["available"], list)
 
 
 def test_simple_retriever_returns_top_k_sorted() -> None:
@@ -70,6 +62,155 @@ def test_simple_retriever_returns_top_k_sorted() -> None:
     })
     docs = retriever.retrieve("agent orchestration", top_k=2)
     assert len(docs) == 2
-    # `a.md` and `c.md` both contain "agent" and "orchestration".
     assert docs[0].score >= docs[1].score
     assert {d.name for d in docs} == {"a.md", "c.md"}
+
+
+# ----------------- Reasoning agent traces -----------------
+
+
+@pytest.mark.asyncio
+async def test_rag_agent_emits_trace_with_retriever_selected() -> None:
+    agent = RAGAgent()
+    response = await agent.handle(
+        AgentRequest(query="agent orchestration patterns")
+    )
+    assert response.success
+    assert response.trace is not None
+    trace = response.trace
+    assert trace["agent_name"] == "RAGAgent"
+    assert trace["llm_mode"] == LLMMode.MOCK.value
+    assert "simple_retriever" in trace["selected_tools"]
+    assert "load_knowledge_base" in trace["skipped_tools"]
+    assert response.data.get("documents")
+
+
+@pytest.mark.asyncio
+async def test_summarizer_calls_no_tools_for_pasted_text() -> None:
+    """Pasted text → SummarizerAgent must pick zero tools (the LLM synthesizes)."""
+    agent = SummarizerAgent()
+    response = await agent.handle(
+        AgentRequest(
+            query="The meaning of life is to live and create meaning together.",
+            context={},  # no retrieved docs
+        )
+    )
+    trace = response.trace
+    assert trace is not None
+    assert trace["selected_tools"] == []
+    assert "[mock-llm]" in response.content
+
+
+@pytest.mark.asyncio
+async def test_coding_agent_picks_template_for_fastapi_request() -> None:
+    agent = CodingAgent()
+    response = await agent.handle(
+        AgentRequest(query="Build a FastAPI endpoint for uploading documents.")
+    )
+    trace = response.trace
+    assert trace is not None
+    assert "template_loader" in trace["selected_tools"]
+    assert response.data["language"] == "python"
+    assert "FastAPI" in response.data["code"]
+
+
+@pytest.mark.asyncio
+async def test_review_agent_invokes_all_three_review_tools() -> None:
+    agent = ReviewAgent()
+    response = await agent.handle(
+        AgentRequest(
+            query="Review this code",
+            context={"code": 'def f():\n    API_KEY = "abc-secret-1234"\n    return 1\n'},
+        )
+    )
+    trace = response.trace
+    assert trace is not None
+    assert set(trace["selected_tools"]) == {
+        "code_review_tool",
+        "security_review_tool",
+        "test_gap_tool",
+    }
+    review = response.data["review"]
+    assert any(
+        f["category"] == "security" for f in review["findings"]
+    ), f"Expected a security finding, got: {review['findings']}"
+
+
+@pytest.mark.asyncio
+async def test_review_agent_skips_tools_when_no_code() -> None:
+    agent = ReviewAgent()
+    response = await agent.handle(
+        AgentRequest(query="Review this code", context={"code": ""})
+    )
+    trace = response.trace
+    assert trace is not None
+    assert trace["selected_tools"] == []
+    assert set(trace["skipped_tools"]) == {
+        "code_review_tool",
+        "security_review_tool",
+        "test_gap_tool",
+    }
+
+
+# ----------------- Manager-level routing decisions -----------------
+
+
+@pytest.mark.asyncio
+async def test_research_manager_skips_rag_for_philosophical_text() -> None:
+    """The 'meaning of life' case from the spec: SummarizerAgent only."""
+    manager = ResearchManagerAgent()
+    response = await manager.handle(
+        AgentRequest(
+            query=(
+                "The meaning of life is to live, to understand, and to "
+                "create something meaningful to share with others."
+            )
+        )
+    )
+    trace = response.trace
+    assert trace is not None
+    assert "call_summarizer_agent" in trace["selected_tools"]
+    assert "call_rag_agent" not in trace["selected_tools"], (
+        "Philosophical pasted text must not trigger the RAG worker"
+    )
+
+
+@pytest.mark.asyncio
+async def test_research_manager_uses_rag_for_lookup_intent() -> None:
+    manager = ResearchManagerAgent()
+    response = await manager.handle(
+        AgentRequest(query="Search the knowledge base for agent orchestration patterns.")
+    )
+    trace = response.trace
+    assert trace is not None
+    assert set(trace["selected_tools"]) == {
+        "call_rag_agent",
+        "call_summarizer_agent",
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_manager_runs_review_as_default_quality_gate() -> None:
+    manager = BuildManagerAgent()
+    response = await manager.handle(
+        AgentRequest(query="Build a small FastAPI endpoint.")
+    )
+    trace = response.trace
+    assert trace is not None
+    assert set(trace["selected_tools"]) == {
+        "call_coding_agent",
+        "call_review_agent",
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_manager_skips_review_when_user_opts_out() -> None:
+    manager = BuildManagerAgent()
+    response = await manager.handle(
+        AgentRequest(query="Build a small FastAPI endpoint, no review please.")
+    )
+    trace = response.trace
+    assert trace is not None
+    assert "call_coding_agent" in trace["selected_tools"]
+    assert "call_review_agent" not in trace["selected_tools"]
+    assert "call_review_agent" in trace["skipped_tools"]

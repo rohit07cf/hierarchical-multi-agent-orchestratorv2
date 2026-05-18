@@ -1,30 +1,24 @@
-"""Deterministic heuristic-based code review.
+"""General-purpose code review primitive.
 
-Real-world review tooling would use static analysis or an LLM; this
-implementation uses a small ruleset so reviews are reproducible and
-testable offline. The intent is to demonstrate the *shape* of a review
-agent's output (categorized findings, severity, summary), not to replace
-a real linter.
+Focuses on clarity, error handling, and production-readiness signals
+that aren't security-specific (those live in `security_review_tool.py`)
+and aren't test-coverage-specific (those live in `test_gap_tool.py`).
+The ReviewAgent's LLM combines all three into a single review.
 """
 
 from __future__ import annotations
-
-import re
 
 from src.models.responses import ReviewFinding, ReviewResult, ReviewSeverity
 
 
 def review_code(code: str) -> ReviewResult:
-    """Inspect a code snippet for common production-readiness issues.
+    """Inspect `code` for general bugs and clarity issues.
 
-    Args:
-        code: Source code to review.
-
-    Returns:
-        A `ReviewResult` with categorized findings and an overall verdict.
+    Returns a `ReviewResult` rather than a plain dict so callers that
+    want a verdict (BuildManager's quality gate) can read `approved`
+    directly.
     """
     findings: list[ReviewFinding] = []
-    code_lower = code.lower()
 
     if not code.strip():
         return ReviewResult(
@@ -39,30 +33,14 @@ def review_code(code: str) -> ReviewResult:
             ],
         )
 
+    code_lower = code.lower()
+
     if "try" not in code_lower or "except" not in code_lower:
         findings.append(
             ReviewFinding(
                 category="bugs",
                 severity=ReviewSeverity.WARNING,
                 message="No try/except block found — consider explicit error handling.",
-            )
-        )
-
-    if re.search(r"(api[_-]?key|secret|password)\s*=\s*['\"]", code, re.IGNORECASE):
-        findings.append(
-            ReviewFinding(
-                category="security",
-                severity=ReviewSeverity.BLOCKER,
-                message="Hard-coded credential detected — load from environment instead.",
-            )
-        )
-
-    if "test_" not in code_lower and "def test" not in code_lower:
-        findings.append(
-            ReviewFinding(
-                category="tests",
-                severity=ReviewSeverity.INFO,
-                message="No tests included; add unit tests covering happy and error paths.",
             )
         )
 
@@ -86,7 +64,7 @@ def review_code(code: str) -> ReviewResult:
 
     has_blocker = any(f.severity == ReviewSeverity.BLOCKER for f in findings)
     summary = (
-        f"{len(findings)} finding(s); "
+        f"{len(findings)} general finding(s); "
         f"{'blockers present' if has_blocker else 'no blockers'}."
     )
     return ReviewResult(approved=not has_blocker, summary=summary, findings=findings)
