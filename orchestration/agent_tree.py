@@ -156,9 +156,12 @@ class AgentTree:
 
     def _add_nodes_to_graph(self, dot: Any, node: AgentNode) -> None:
         """Recursively add nodes and edges to the Graphviz digraph."""
-        # Color scheme based on agent role
-        if node.name == "Supervisor":
+        # Color scheme by role: root supervisor / manager / worker.
+        if node.name == "RootSupervisorAgent":
             fillcolor = "#89b4fa"
+            fontcolor = "#1e1e2e"
+        elif node.name.endswith("ManagerAgent"):
+            fillcolor = "#f9e2af"
             fontcolor = "#1e1e2e"
         else:
             fillcolor = "#a6e3a1"
@@ -193,34 +196,33 @@ class AgentTree:
 
     @classmethod
     def build_default_tree(cls) -> AgentTree:
-        """Build the default supervisor-child agent tree.
+        """Build the 3-layer hierarchical agent tree.
 
         Returns:
-            AgentTree with Supervisor as root and all four child agents.
+            AgentTree shaped as RootSupervisorAgent → managers → workers.
         """
-        supervisor = AgentNode(name="Supervisor")
-        supervisor.add_tool("reasoning_step")
+        root = AgentNode(name="RootSupervisorAgent")
+        root.add_tool("router")
+        root.add_tool("execution_engine")
 
-        simple = AgentNode(name="SimpleAgent")
-        simple.add_tool("add_numbers")
-        simple.add_tool("echo_text")
+        research = AgentNode(name="ResearchManagerAgent")
+        rag = AgentNode(name="RAGAgent")
+        rag.add_tool("simple_retriever")
+        rag.add_tool("load_knowledge_base")
+        summarizer = AgentNode(name="SummarizerAgent")
+        summarizer.add_tool("llm_summarize")
+        research.add_child(rag)
+        research.add_child(summarizer)
 
-        math = AgentNode(name="MathAgent")
-        math.add_tool("add_numbers")
-        math.add_tool("subtract_numbers")
-        math.add_tool("multiply_numbers")
+        build = AgentNode(name="BuildManagerAgent")
+        coding = AgentNode(name="CodingAgent")
+        coding.add_tool("llm_codegen")
+        review = AgentNode(name="ReviewAgent")
+        review.add_tool("review_code")
+        build.add_child(coding)
+        build.add_child(review)
 
-        echo = AgentNode(name="EchoAgent")
-        echo.add_tool("echo_text")
-        echo.add_tool("reverse_text")
+        root.add_child(research)
+        root.add_child(build)
 
-        classifier = AgentNode(name="ClassifierAgent")
-        classifier.add_tool("classify_intent")
-        classifier.add_tool("detect_sentiment")
-
-        supervisor.add_child(simple)
-        supervisor.add_child(math)
-        supervisor.add_child(echo)
-        supervisor.add_child(classifier)
-
-        return cls(root=supervisor)
+        return cls(root=root)

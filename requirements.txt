@@ -1,20 +1,27 @@
-# Core dependencies
-openai-agents>=0.0.7
-openai>=1.66.0
+# Core dependencies — required for the offline demo, CLI, and tests.
 pydantic>=2.10.0
 pydantic-settings>=2.7.0
-
-# Temporal workflow orchestration
-temporalio>=1.9.0
 
 # Streamlit UI
 streamlit>=1.41.0
 
-# Visualization
+# Visualization (for the agent hierarchy diagram)
 graphviz>=0.20.0
-
-# Logging
-structlog>=24.4.0
 
 # Environment management
 python-dotenv>=1.0.1
+
+# Optional: real LLM completions (only used when OPENAI_API_KEY is set).
+openai>=1.66.0
+
+# Optional: legacy openai-agents SDK — only required by the old
+# agent_defs/{simple,math,echo,classifier}_agent.py modules. The new
+# 3-layer hierarchy does not depend on it.
+# openai-agents>=0.0.7
+
+# Optional: Temporal workflow durability layer.
+# temporalio>=1.9.0
+
+# Test deps
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

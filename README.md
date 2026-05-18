@@ -1,169 +1,292 @@
 # Hierarchical Multi-Agent Orchestrator
 
-A production-grade hierarchical multi-agent orchestration system built with the OpenAI Agents SDK, featuring supervisor-driven task decomposition, HITL (Human-In-The-Loop) state management, Temporal workflow durability, and real-time streaming.
+A production-inspired, recruiter-friendly demonstration of hierarchical
+multi-agent orchestration. A `RootSupervisorAgent` decomposes user
+queries, routes work to specialized **manager agents**, and the managers
+delegate the actual work to focused **worker agents**. Every step is
+recorded on an observable execution timeline that the Streamlit UI
+renders live, with full HITL (human-in-the-loop) support.
+
+The project is intentionally **lightweight**: it runs offline (no API key
+required), but transparently uses the OpenAI API when `OPENAI_API_KEY` is
+set.
+
+## Recruiter-friendly summary
+
+- **3-layer hierarchical orchestration** — supervisor → managers →
+  workers — modelled after real production systems.
+- **Structured Pydantic models** for every request, response, plan, and
+  state transition.
+- **Deterministic routing** that is testable, reproducible, and easy to
+  explain in an interview.
+- **Local RAG over a small markdown knowledge base** with a hand-rolled
+  retriever — no vector DB dependency.
+- **Code generation + automated review** chain with a heuristic review
+  tool (security, error handling, test coverage, clarity).
+- **Streamlit UI** with reasoning panel, subtask table, state inspector,
+  execution timeline, agent hierarchy visualization, and HITL controls.
+- **Offline mock LLM** so the project demos cleanly without paid APIs.
+- **Test suite** covering routing, agents, and orchestration flow.
 
 ## Architecture
 
 ```
-                    ┌──────────────┐
-                    │  Supervisor  │
-                    │  Agent       │
-                    │ [reasoning]  │
-                    └──────┬───────┘
-           ┌───────┬───────┼───────┬────────┐
-           ▼       ▼       ▼       ▼        ▼
-     ┌─────────┐┌──────┐┌──────┐┌───────────┐
-     │ Simple  ││ Math ││ Echo ││Classifier │
-     │ Agent   ││Agent ││Agent ││  Agent    │
-     │[add,    ││[add, ││[echo,││[classify, │
-     │ echo]   ││sub,  ││rev]  ││ sentiment]│
-     │         ││mul]  ││      ││           │
-     └─────────┘└──────┘└──────┘└───────────┘
+RootSupervisorAgent
+  ├── ResearchManagerAgent
+  │      ├── RAGAgent
+  │      └── SummarizerAgent
+  │
+  └── BuildManagerAgent
+         ├── CodingAgent
+         └── ReviewAgent
 ```
 
-### Design Patterns
+```mermaid
+graph TD
+    User[User Query] --> Supervisor[RootSupervisorAgent]
+    Supervisor --> ResearchManager[ResearchManagerAgent]
+    Supervisor --> BuildManager[BuildManagerAgent]
+    ResearchManager --> RAG[RAGAgent]
+    ResearchManager --> Summarizer[SummarizerAgent]
+    BuildManager --> Coding[CodingAgent]
+    BuildManager --> Review[ReviewAgent]
+    Summarizer --> Supervisor
+    Review --> Supervisor
+    Supervisor --> Final[Final Response]
+```
 
-- **Supervisor-Child Agent Pattern**: One supervisor orchestrates multiple specialized child agents
-- **Template Method Pattern**: Base agent class defines execution pipeline; subclasses customize behavior
-- **ReAct Pattern**: Child agents use Reasoning + Acting loops for multi-step execution
-- **HITL State Restoration**: Pause, review, revise, and resume agent execution at any checkpoint
+### Agent responsibilities
 
-## Features
+| Layer | Agent                  | Responsibility                                                                 |
+|-------|------------------------|--------------------------------------------------------------------------------|
+| 1     | `RootSupervisorAgent`  | Plan, route, aggregate; owns the orchestration state and timeline.             |
+| 2     | `ResearchManagerAgent` | Coordinate the retrieval + summarization chain.                                |
+| 2     | `BuildManagerAgent`    | Coordinate the code-generation + review chain.                                 |
+| 3     | `RAGAgent`             | Retrieve relevant docs from the local markdown knowledge base.                 |
+| 3     | `SummarizerAgent`      | Condense retrieved docs into a 2-3 sentence context summary.                   |
+| 3     | `CodingAgent`          | Produce a focused Python/FastAPI snippet.                                      |
+| 3     | `ReviewAgent`          | Audit generated code for bugs, security, missing tests, clarity, production.  |
 
-- **Hierarchical Agent Management**: AgentTree and AgentNode for tree-based agent organization with visualization
-- **Task Decomposition**: Supervisor analyzes requests and routes subtasks to specialized agents
-- **4 Specialized Child Agents**: SimpleAgent, MathAgent, EchoAgent, ClassifierAgent
-- **HITL Support**: Pause/resume with Cancel, Revise, and Approve actions
-- **Real-time Streaming**: StreamingCallbackHandler with async queue for live UI updates
-- **Temporal Workflows**: Durable orchestration with retry logic and heartbeat monitoring
-- **Structured Outputs**: Pydantic models throughout for type safety
-- **Streamlit UI**: Interactive interface with agent tree visualization, reasoning panel, and state inspector
+### Orchestration flow
 
-## Quick Start
+1. The user submits a query through Streamlit (or the CLI).
+2. The supervisor's `Router` deterministically picks the needed managers
+   based on keyword signals — research, build, or both.
+3. The supervisor builds an `ExecutionPlan` (a list of `AgentTask`s).
+4. The `ExecutionEngine` runs each task sequentially, recording an
+   `ExecutionStep` on the `OrchestratorState` for every transition.
+5. Each manager invokes its workers in order, passing structured context
+   forward (retrieved documents become the CodingAgent's grounding).
+6. The supervisor aggregates the final user-facing answer.
+7. Every event is mirrored into the Streamlit "Execution Timeline" and
+   "Streaming Log" panels.
+
+## Streamlit UI
+
+> Screenshots — drop into `docs/screenshots/` and link them here once
+> the app is running locally (e.g. `![reasoning panel](docs/screenshots/reasoning.png)`).
+> The UI ships with all of the panels described below.
+
+The Streamlit app preserves every recruiter-visible orchestration
+feature from the previous version:
+
+- Conversation chat
+- Manual / Auto / HITL execution modes
+- **Reasoning & Decomposition** panel — shows the routing reasoning,
+  planned tasks, and tools needed.
+- **Subtask Results** panel — table of agent outcomes.
+- **State Inspector (Debug)** — exposes `state_id`, `iteration_count`,
+  every `ExecutionStep`, the `tool_path`, and the raw JSON output of the
+  final orchestration result.
+- **Streaming Log** — live orchestration trace pushed by the
+  `StreamingCallbackHandler`.
+- **Agent Hierarchy** sidebar — Graphviz-rendered tree of the 3-layer
+  architecture.
+
+### HITL (Human-In-The-Loop)
+
+Three execution modes:
+
+- **Auto** — runs end-to-end.
+- **Manual** — runs to completion but explicitly through the supervisor's
+  manual pipeline; useful for non-interactive contexts.
+- **HITL** — pauses twice per run:
+  1. **After decomposition** — the user reviews the planned subtasks and
+     can Approve / Revise / Cancel.
+  2. **Before each subtask** — the user confirms the upcoming agent
+     invocation, with full visibility into what has completed so far.
+
+The paused state is persisted to `.hitl_states/` so it survives
+Streamlit reruns.
+
+### State inspector and execution tracing
+
+`OrchestratorState` is the single source of truth for everything that
+happened during a run:
+
+```
+state_id          UUID for the run
+user_query        The original request
+plan              ExecutionPlan (reasoning + AgentTasks)
+steps             Chronological list of ExecutionSteps
+status            initialized / planning / running / paused / completed
+current_tool      Currently executing agent
+tool_path         Hierarchical path (e.g. RootSupervisorAgent.BuildManagerAgent)
+final_answer      The aggregated user-facing answer
+```
+
+Step kinds emitted on the timeline:
+
+- `task_decomposition` — supervisor produced a plan
+- `subtask_started` — a manager began executing
+- `subtask_complete` — a manager finished
+- `orchestration_complete` — final answer aggregated
+
+## Setup
 
 ### Prerequisites
 
 - Python 3.10+
-- OpenAI API key
 
-### Installation
+### Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Configuration
+### Configuration (optional)
 
 Create a `.env` file in the project root:
 
 ```env
-OPENAI_API_KEY=your-api-key-here
+OPENAI_API_KEY=sk-...        # optional — enables real LLM completions
 OPENAI_MODEL=gpt-4.1-nano
 LOG_LEVEL=INFO
 ```
 
-### Running
+Without `OPENAI_API_KEY`, the system runs entirely on the offline mock
+LLM and deterministic worker fallbacks.
+
+## Running locally
+
+### Streamlit UI
 
 ```bash
 streamlit run main.py
 ```
 
-### With Docker (includes Temporal)
+### CLI demo
 
 ```bash
-docker-compose up
+python -m src.examples.demo_queries
 ```
 
-## Project Structure
+The CLI prints the user query, routing decision, execution plan,
+orchestration trace, and final response for each demo query.
 
-```
-├── agents/
-│   ├── base_agent.py          # Abstract base with Template Method pattern
-│   ├── supervisor.py          # Supervisor: task decomposition & delegation
-│   ├── simple_agent.py        # SimpleAgent: add_numbers, echo_text
-│   ├── math_agent.py          # MathAgent: add, subtract, multiply
-│   ├── echo_agent.py          # EchoAgent: echo_text, reverse_text
-│   └── classifier_agent.py   # ClassifierAgent: classify_intent, detect_sentiment
-├── tools/
-│   ├── math_tools.py          # Mathematical operation tools
-│   ├── text_tools.py          # Text manipulation tools
-│   ├── classification_tools.py # NLP classification tools
-│   └── supervisor_tools.py    # Supervisor reasoning tool
-├── models/
-│   ├── agent_state.py         # AgentState, HITLAction, IntermediateStep
-│   ├── supervisor_output.py   # SupervisorOutput, SubtaskResult, TaskDecomposition
-│   ├── streaming_models.py    # StreamingModelResponseStep
-│   └── tool_models.py         # ToolResult, ToolCall, ToolDefinition
-├── orchestration/
-│   ├── agent_tree.py          # AgentTree & AgentNode with Graphviz visualization
-│   ├── streaming_handler.py   # StreamingCallbackHandler (AgentHooks)
-│   ├── hitl_manager.py        # HITL state capture, persist, restore
-│   └── temporal_workflow.py   # Temporal workflow & activity definitions
-├── prompts/
-│   ├── supervisor_prompt.py   # Supervisor task decomposition prompt
-│   ├── react_prompt.py        # ReAct pattern prompt template
-│   └── tool_selection_prompt.py # Tool selection guidance prompt
-├── ui/
-│   ├── streamlit_app.py       # Main Streamlit application
-│   ├── components.py          # Reusable UI components
-│   └── visualizations.py      # Charts, tables, tree rendering
-├── hooks/
-│   └── run_hooks.py           # AgentHooks & ToolHooksImpl
-├── config/
-│   └── settings.py            # Pydantic Settings configuration
-├── utils/
-│   ├── logging.py             # Structured logging setup
-│   ├── validators.py          # Pydantic validation helpers
-│   └── serializers.py         # JSON serialization with enhanced type support
-├── main.py                    # Entry point
-├── requirements.txt           # Python dependencies
-├── docker-compose.yml         # Temporal + app containers
-└── README.md
+### Tests
+
+```bash
+pytest
 ```
 
-## Data Models
+## Sample queries
 
-### AgentState
-Captures complete execution state for pause/resume and HITL:
-- `current_inputs`: Active input parameters
-- `intermediate_steps`: Ordered execution trace
-- `tool_path`: Hierarchical path (e.g., `Supervisor.ClassifierAgent`)
-- `iteration_count`: ReAct loop iterations
-- `is_paused`: HITL pause flag
-- `hitl_actions`: History of user interventions
+1. *Summarize the architecture of this project.*
+2. *Build a FastAPI endpoint for uploading documents and review the
+   solution.*
+3. *Search the knowledge base for agent orchestration patterns and
+   generate implementation guidance.*
+4. *Generate a simple Redis memory tool and review it for production
+   concerns.*
 
-### SupervisorOutput
-Structured output from orchestration:
-- `final_answer`: Aggregated response
-- `subtasks`: List of SubtaskResult with per-agent outcomes
-- `decomposition`: TaskDecomposition plan
-
-### StreamingModelResponseStep
-Real-time UI update events:
-- Token streaming, tool calls, tool results, errors, HITL pauses
-
-## Example Interaction
+Example orchestration trace (from query 3):
 
 ```
-User: "What's the sentiment of 'I love this product'? Also multiply 5 * 3"
-
-Supervisor:
-  REASON: User wants sentiment analysis AND math calculation
-  ACTION: Decompose into 2 subtasks
-
-Subtask 1 -> ClassifierAgent.detect_sentiment:
-  Result: sentiment = "positive", confidence = 0.70
-
-Subtask 2 -> MathAgent.multiply_numbers:
-  Result: 5 x 3 = 15
-
-Final Answer: Sentiment is positive (70% confidence). 5 x 3 = 15.
+[RootSupervisor] Decomposing task
+[ResearchManager] Requesting context retrieval
+[RAGAgent] Retrieved architecture_notes.md, agent_patterns.md
+[SummarizerAgent] Generated summary
+[BuildManager] Starting implementation flow
+[CodingAgent] Generated FastAPI endpoint
+[ReviewAgent] Found missing error handling
+[RootSupervisor] Aggregating final response
 ```
 
-## Tech Stack
+## Project structure
 
-- **[OpenAI Agents SDK](https://github.com/openai/openai-agents-python)**: Agent framework with handoffs, tools, and hooks
-- **[Temporal](https://temporal.io)**: Workflow orchestration and durability
-- **[Pydantic](https://docs.pydantic.dev)**: Data validation and structured outputs
-- **[Streamlit](https://streamlit.io)**: Interactive UI
-- **[Graphviz](https://graphviz.org)**: Agent hierarchy visualization
+```
+src/
+  orchestrator/
+    supervisor.py          # RootSupervisorAgent
+    router.py              # Deterministic routing
+    state.py               # Re-export of state models
+    execution_engine.py    # Task loop + HITL hook
+  agents/
+    base.py
+    research_manager.py
+    build_manager.py
+    rag_agent.py
+    summarizer_agent.py
+    coding_agent.py
+    review_agent.py
+  tools/
+    document_loader.py
+    simple_retriever.py
+    code_review_tool.py
+  models/
+    requests.py            # AgentRequest
+    responses.py           # AgentResponse, ReviewResult, ReviewFinding
+    state_models.py        # OrchestratorState, ExecutionPlan, AgentTask, ExecutionStep
+  llm/
+    client.py              # OpenAI client with deterministic mock fallback
+  examples/
+    demo_queries.py        # CLI demo
+
+knowledge_base/
+  architecture_notes.md
+  agent_patterns.md
+  fastapi_examples.md
+
+tests/
+  test_routing.py
+  test_agents.py
+  test_orchestrator.py
+
+ui/                        # Streamlit app (legacy path preserved)
+streamlit_app/             # Mirror namespace for future multi-page expansion
+agent_defs/                # Legacy supervisor — now a thin bridge to src/
+orchestration/             # AgentTree, HITLManager, StreamingCallbackHandler
+models/                    # Legacy Pydantic models consumed by the Streamlit UI
+main.py                    # `streamlit run main.py` entry point
+```
+
+## Backward compatibility
+
+The previous version exposed `SupervisorAgent`, `SimpleAgent`,
+`MathAgent`, `EchoAgent`, and `ClassifierAgent`. The names are
+preserved:
+
+- `agent_defs.supervisor.SupervisorAgent` is now a thin bridge that
+  delegates every call to `src.orchestrator.RootSupervisorAgent` while
+  exposing the same `orchestrate` / `orchestrate_manual` /
+  `resume_orchestration` / `state` API the Streamlit app already
+  consumes.
+- `SupervisorAgent.CHILD_AGENT_MAP` still resolves the old worker agent
+  module paths, but the live `child_agents` dict now reflects the new
+  3-layer hierarchy.
+- The legacy worker agents (`SimpleAgent`, `MathAgent`, …) are only
+  imported when the optional `openai-agents` SDK is installed.
+
+## Future improvements
+
+- Replace the keyword retriever with a sentence-transformer embedding
+  store for richer retrieval.
+- Add a `PlannerAgent` that uses the LLM to produce non-trivial multi-
+  step plans (instead of the current 1-2 task plans).
+- Add streaming token rendering in the Streamlit UI when an
+  `OPENAI_API_KEY` is configured.
+- Persist `OrchestratorState` to disk and add a "rerun from step N"
+  control to the state inspector.
+- Wire the supervisor into the existing Temporal workflow scaffolding
+  for durable execution.

@@ -21,7 +21,7 @@ def render_message_input() -> str | None:
     with st.form("message_form", clear_on_submit=True):
         user_input = st.text_area(
             "Enter your request:",
-            placeholder="e.g., What's the sentiment of 'I love this product'? Also multiply 5 * 3",
+            placeholder="e.g., Build a FastAPI endpoint for uploading documents and review the solution",
             height=100,
             key="user_input",
         )

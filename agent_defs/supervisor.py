@@ -1,4 +1,19 @@
-"""Supervisor agent: orchestrates task decomposition and delegates to child agents."""
+"""Backward-compatible SupervisorAgent — bridge to the new RootSupervisorAgent.
+
+The Streamlit UI is built around the legacy `SupervisorAgent` interface:
+
+    SupervisorAgent.orchestrate(...)
+    SupervisorAgent.orchestrate_manual(...)
+    SupervisorAgent.resume_orchestration(...)
+    SupervisorAgent.state    -> AgentState
+    SupervisorAgent._child_agents
+
+This module keeps that surface intact while delegating the real work to
+the refactored 3-layer hierarchy in `src/`. The bridge translates between
+the legacy `SupervisorOutput` / `AgentState` models and the new
+`OrchestratorState` / `AgentResponse` models so the UI does not need to
+change.
+"""
 
 from __future__ import annotations
 
@@ -6,104 +21,144 @@ import json
 import logging
 from typing import Any
 
-from agents import Agent, Runner, function_tool
-
-from agent_defs.base_agent import BaseAgent
-from agent_defs.simple_agent import SimpleAgentDef
-from agent_defs.math_agent import MathAgentDef
-from agent_defs.echo_agent import EchoAgentDef
-from agent_defs.classifier_agent import ClassifierAgentDef
-from models.agent_state import HITLCheckpointType
+from models.agent_state import AgentState, HITLCheckpointType
 from models.supervisor_output import (
+    PlannedSubtask,
     SubtaskResult,
     SubtaskStatus,
     SupervisorOutput,
     TaskDecomposition,
-    PlannedSubtask,
 )
-from models.tool_models import ToolResult
 from orchestration.hitl_manager import HITLManager
-from prompts.supervisor_prompt import get_supervisor_prompt
+from src.models.state_models import OrchestratorState, TaskStatus
+from src.models.responses import AgentResponse as NewAgentResponse
+from src.orchestrator.supervisor import RootSupervisorAgent
 
 logger = logging.getLogger(__name__)
 
 
-# Sentinel returned when orchestration pauses for HITL review
-HITL_PAUSED_SENTINEL = "__HITL_PAUSED__"
+def _plan_to_decomposition(state: OrchestratorState) -> TaskDecomposition:
+    """Convert the new `ExecutionPlan` into the legacy `TaskDecomposition`."""
+    plan = state.plan
+    assert plan is not None
+    return TaskDecomposition(
+        original_request=plan.original_request,
+        reasoning=plan.reasoning,
+        subtasks=[
+            PlannedSubtask(
+                agent_name=t.agent_name,
+                description=t.description,
+                tools_needed=t.tools_needed,
+                depends_on=t.depends_on,
+            )
+            for t in plan.tasks
+        ],
+    )
 
 
-@function_tool
-def reasoning_step(thought: str, action_plan: str, agents_needed: str) -> str:
-    """Execute a structured reasoning step for task decomposition.
+def _task_result_to_subtask(task) -> SubtaskResult:
+    """Convert a new `AgentTask` (post-execution) to a legacy `SubtaskResult`."""
+    status_map = {
+        TaskStatus.COMPLETED: SubtaskStatus.COMPLETED,
+        TaskStatus.FAILED: SubtaskStatus.FAILED,
+        TaskStatus.RUNNING: SubtaskStatus.RUNNING,
+        TaskStatus.PENDING: SubtaskStatus.PENDING,
+    }
+    result_payload: Any = None
+    if task.result and isinstance(task.result, dict):
+        result_payload = task.result.get("content") or task.result
+    return SubtaskResult(
+        agent_name=task.agent_name,
+        subtask=task.description,
+        result=result_payload,
+        status=status_map[task.status],
+        error=task.error,
+    )
 
-    Use this tool to reason through how to decompose a user request
-    into subtasks and which agents should handle each subtask.
 
-    Args:
-        thought: Your analysis of the user request.
-        action_plan: The planned sequence of agent delegations.
-        agents_needed: Comma-separated list of agents required.
+def _sync_legacy_state(
+    legacy: AgentState,
+    new: OrchestratorState,
+    streaming: Any | None = None,
+) -> None:
+    """Mirror the new state's timeline onto the legacy `AgentState`.
+
+    The legacy state is what the Streamlit "State Inspector" reads from,
+    so every execution step recorded on `OrchestratorState` is replayed
+    onto `AgentState` (idempotent — only new steps are appended). When a
+    streaming handler is supplied, the same steps are mirrored into its
+    buffer so the "Streaming Log" panel updates in lock-step.
     """
-    agents_list = [a.strip() for a in agents_needed.split(",") if a.strip()]
-    return ToolResult.ok(
-        result={
-            "thought": thought,
-            "action_plan": action_plan,
-            "agents_needed": agents_list,
-            "reasoning_complete": True,
-        },
-        tool_name="reasoning_step",
-    ).model_dump_json()
+    legacy.tool = new.current_tool
+    legacy.tool_path = new.tool_path
+    legacy.current_inputs = {"user_input": new.user_query}
+
+    existing = len(legacy.intermediate_steps)
+    for step in new.steps[existing:]:
+        legacy.add_step(
+            agent_name=step.agent_name,
+            action=step.kind.value,
+            action_input=step.payload,
+            observation=step.message,
+        )
+        if streaming is not None:
+            streaming.push_orchestration_step(
+                agent_name=step.agent_name,
+                kind=step.kind.value,
+                message=step.message,
+            )
 
 
-class SupervisorAgent(BaseAgent):
-    """Supervisor agent that decomposes tasks and delegates to specialized child agents.
+class SupervisorAgent:
+    """Legacy-shaped supervisor that delegates to `RootSupervisorAgent`.
 
-    Maintains a registry of child agents and orchestrates multi-step workflows
-    by routing subtasks to the appropriate child agent based on the task requirements.
-
-    Supports two HITL checkpoint types:
-    - DECOMPOSITION: Pauses after task decomposition for plan review
-    - TOOL_EXECUTION: Pauses before each child agent runs for tool confirmation
+    The class keeps the original public API (orchestrate / orchestrate_manual
+    / resume_orchestration / state / _child_agents) so callers — most
+    notably the Streamlit app — do not need to change. Internally every
+    call routes through the new hierarchical orchestrator in `src/`.
     """
 
-    CHILD_AGENT_MAP: dict[str, type[BaseAgent]] = {
-        "SimpleAgent": SimpleAgentDef,
-        "MathAgent": MathAgentDef,
-        "EchoAgent": EchoAgentDef,
-        "ClassifierAgent": ClassifierAgentDef,
+    # Backward-compatible map of the *old* worker agent names. The new
+    # system does not use these; the field is preserved only so any
+    # caller that introspected `CHILD_AGENT_MAP` continues to resolve.
+    CHILD_AGENT_MAP: dict[str, str] = {
+        "SimpleAgent": "agent_defs.simple_agent.SimpleAgentDef",
+        "MathAgent": "agent_defs.math_agent.MathAgentDef",
+        "EchoAgent": "agent_defs.echo_agent.EchoAgentDef",
+        "ClassifierAgent": "agent_defs.classifier_agent.ClassifierAgentDef",
     }
 
     def __init__(self, model: str = "gpt-4.1-nano") -> None:
-        super().__init__(name="Supervisor", model=model)
-        self._child_agents: dict[str, BaseAgent] = {}
-        self._initialize_children()
-
-    def _initialize_children(self) -> None:
-        """Instantiate all child agents."""
-        for name, agent_cls in self.CHILD_AGENT_MAP.items():
-            self._child_agents[name] = agent_cls(model=self.model)
+        self.name = "RootSupervisorAgent"
+        self.model = model
+        self._state = AgentState(tool_path=self.name)
+        self._root = RootSupervisorAgent(model=model)
+        self.streaming_handler: Any | None = None
+        # Expose the live hierarchy (managers + workers) plus the legacy
+        # worker agents under their original names for backward compat.
+        self._child_agents: dict[str, Any] = {
+            "ResearchManagerAgent": self._root.managers["ResearchManagerAgent"],
+            "BuildManagerAgent": self._root.managers["BuildManagerAgent"],
+            "RAGAgent": self._root.managers["ResearchManagerAgent"].rag,
+            "SummarizerAgent": self._root.managers["ResearchManagerAgent"].summarizer,
+            "CodingAgent": self._root.managers["BuildManagerAgent"].coder,
+            "ReviewAgent": self._root.managers["BuildManagerAgent"].reviewer,
+        }
 
     @property
-    def child_agents(self) -> dict[str, BaseAgent]:
-        """Access the registry of child agents."""
+    def child_agents(self) -> dict[str, Any]:
+        """Live registry of manager and worker agents (read-only)."""
         return self._child_agents
 
-    def _get_system_prompt(self) -> str:
-        return get_supervisor_prompt()
+    # Legacy state surface — what Streamlit reads.
+    @property
+    def state(self) -> AgentState:
+        """Current agent execution state (for state inspector)."""
+        return self._state
 
-    def _register_tools(self) -> list[Any]:
-        return [reasoning_step]
-
-    def _build_agent(self) -> Agent:
-        """Build the supervisor agent with tools for task decomposition."""
-        self._tools = self._register_tools()
-        return Agent(
-            name=self.name,
-            instructions=self._get_system_prompt(),
-            tools=self._tools,
-            model=self.model,
-        )
+    def reset_state(self) -> None:
+        """Reset agent state for a fresh execution."""
+        self._state = AgentState(tool_path=self.name)
 
     async def orchestrate(
         self,
@@ -111,62 +166,67 @@ class SupervisorAgent(BaseAgent):
         hitl_manager: HITLManager | None = None,
         enable_hitl: bool = False,
     ) -> SupervisorOutput | None:
-        """Run the full orchestration pipeline: decompose, delegate, aggregate.
+        """Run the full pipeline, optionally pausing at HITL checkpoints.
 
-        When enable_hitl=True, execution pauses at two checkpoints:
-        1. After decomposition — user reviews the planned subtasks
-        2. Before each tool execution — user confirms each agent delegation
-
-        Returns None when paused for HITL (result will come on resume).
-
-        Args:
-            user_input: The user's message or task.
-            hitl_manager: HITLManager for state persistence (required if enable_hitl=True).
-            enable_hitl: Whether to pause at HITL checkpoints.
-
-        Returns:
-            SupervisorOutput with aggregated results, or None if paused for HITL.
+        Behaviour matches the original implementation:
+        - When `enable_hitl=False`, runs end-to-end and returns a
+          `SupervisorOutput`.
+        - When `enable_hitl=True`, pauses after planning and again before
+          each subtask; returns `None` while paused so the caller can read
+          paused state from `hitl_manager`.
         """
         self.reset_state()
         self._state.current_inputs = {"user_input": user_input}
-        logger.info("Supervisor starting orchestration for: %s", user_input[:100])
+        logger.info("Supervisor starting orchestration: %s", user_input[:100])
 
         try:
-            # Step 1: Decompose the task into subtasks
-            decomposition = await self._decompose_task(user_input)
-            self._state.add_step(
-                agent_name=self.name,
-                action="task_decomposition",
-                action_input={"user_input": user_input},
-                observation=json.dumps(decomposition.model_dump(), default=str),
-            )
+            plan = self._root.plan(user_input)
 
-            # HITL Checkpoint 1: Decomposition review
             if enable_hitl and hitl_manager:
+                # HITL: we have to materialize the decomposition step on the
+                # legacy state up-front because we're about to pause before
+                # the new supervisor ever runs.
+                self._state.add_step(
+                    agent_name=self.name,
+                    action="task_decomposition",
+                    action_input={"user_input": user_input},
+                    observation=json.dumps(
+                        {
+                            "reasoning": plan.reasoning,
+                            "tasks": [t.agent_name for t in plan.tasks],
+                        }
+                    ),
+                )
+                if self.streaming_handler is not None:
+                    self.streaming_handler.push_orchestration_step(
+                        agent_name=self.name,
+                        kind="task_decomposition",
+                        message=f"Plan created with {len(plan.tasks)} task(s)",
+                    )
+                # Stash everything needed to resume on the legacy AgentState.
                 self._state.pause(
                     checkpoint_type=HITLCheckpointType.DECOMPOSITION,
                     pending_data={
-                        "decomposition": decomposition.model_dump(mode="json"),
+                        "decomposition": _plan_to_decomposition(
+                            OrchestratorState(user_query=user_input, plan=plan)
+                        ).model_dump(mode="json"),
                         "subtask_index": 0,
                     },
                 )
                 hitl_manager.capture_state(self._state)
-                logger.info("HITL: Paused for decomposition review")
                 return None
 
-            # Step 2 + 3: Execute subtasks and aggregate
-            return await self._execute_and_aggregate(
-                user_input, decomposition, hitl_manager, enable_hitl,
-            )
+            state, response = await self._root.orchestrate(user_input)
+            _sync_legacy_state(self._state, state, self.streaming_handler)
+            return self._build_output(state, response)
 
         except Exception as e:
-            error_msg = f"Orchestration failed: {e}"
-            logger.error(error_msg, exc_info=True)
+            logger.error("Orchestration failed", exc_info=True)
             return SupervisorOutput(
-                final_answer=error_msg,
+                final_answer=f"Orchestration failed: {e}",
                 subtasks=[
                     SubtaskResult(
-                        agent_name="Supervisor",
+                        agent_name=self.name,
                         subtask=user_input,
                         result=None,
                         status=SubtaskStatus.FAILED,
@@ -175,37 +235,33 @@ class SupervisorAgent(BaseAgent):
                 ],
             )
 
+    async def orchestrate_manual(self, user_input: str) -> SupervisorOutput:
+        """Run orchestration to completion without HITL pauses."""
+        self.reset_state()
+        result = await self.orchestrate(user_input)
+        assert result is not None, "manual orchestration should always return a result"
+        return result
+
     async def resume_orchestration(
         self,
         hitl_manager: HITLManager,
         state_id: str,
     ) -> SupervisorOutput | None:
-        """Resume a paused orchestration after HITL action.
+        """Resume a paused HITL orchestration after the user has acted.
 
-        Picks up from where execution paused — either after decomposition
-        review or after tool execution confirmation.
-
-        Args:
-            hitl_manager: The HITLManager holding the paused state.
-            state_id: ID of the paused state to resume.
-
-        Returns:
-            SupervisorOutput if orchestration completes, or None if paused again.
+        Reconstructs the execution plan from the paused state, executes the
+        next pending subtask, and re-pauses for the following one. When
+        the final subtask completes, aggregates and returns the
+        SupervisorOutput.
         """
         state = hitl_manager.get_state(state_id)
         if state is None:
-            logger.error("Cannot resume: state %s not found", state_id)
             return SupervisorOutput(
                 final_answer=f"Error: State {state_id} not found",
                 subtasks=[],
             )
-
-        # Restore internal state
         self._state = state
-        user_input = state.current_inputs.get("user_input", "")
-        pending = state.pending_data
 
-        # Check the last HITL action
         last_action = state.hitl_actions[-1] if state.hitl_actions else None
         if last_action and last_action.action.value == "CANCEL":
             return SupervisorOutput(
@@ -213,102 +269,71 @@ class SupervisorAgent(BaseAgent):
                 subtasks=[],
             )
 
-        # Handle revision: user may have changed the input
+        user_input = state.current_inputs.get("user_input", "")
         if last_action and last_action.action.value == "REVISE" and last_action.input:
             user_input = last_action.input
             state.current_inputs["user_input"] = user_input
 
-        checkpoint = state.checkpoint_type
+        pending = state.pending_data
+        decomposition_data = pending.get("decomposition", {})
+        decomposition = TaskDecomposition.model_validate(decomposition_data)
+
+        # Rebuild a fresh plan from the (possibly revised) input. The new
+        # supervisor's plan() is deterministic so this is reproducible.
+        plan = self._root.plan(user_input)
+
+        # Pause-before-each-subtask semantics:
+        # - DECOMPOSITION approval → re-pause at TOOL_EXECUTION for task 0
+        #   without executing anything (the user has only approved the plan).
+        # - TOOL_EXECUTION approval → execute task at `subtask_index`, then
+        #   either re-pause for the next task or aggregate if done.
+        if state.checkpoint_type == HITLCheckpointType.DECOMPOSITION:
+            return self._repause_before_task(
+                hitl_manager,
+                plan=plan,
+                decomposition=decomposition,
+                subtask_index=0,
+                prior_subtasks=[],
+            )
+
+        subtask_index = pending.get("subtask_index", 0)
+        prior_subtasks = [
+            SubtaskResult.model_validate(r)
+            for r in pending.get("completed_results", [])
+        ]
 
         try:
-            if checkpoint == HITLCheckpointType.DECOMPOSITION:
-                # User approved/revised the decomposition — now execute subtasks
-                decomposition_data = pending.get("decomposition", {})
-                decomposition = TaskDecomposition.model_validate(decomposition_data)
-
-                # If revised, re-decompose with new input
-                if last_action and last_action.action.value == "REVISE":
-                    decomposition = await self._decompose_task(user_input)
-                    self._state.add_step(
-                        agent_name=self.name,
-                        action="task_re_decomposition",
-                        action_input={"revised_input": user_input},
-                        observation=json.dumps(decomposition.model_dump(), default=str),
-                    )
-
-                return await self._execute_and_aggregate(
-                    user_input, decomposition, hitl_manager, enable_hitl=True,
+            subtask_results = list(prior_subtasks)
+            current = plan.tasks[subtask_index]
+            response = await self._root.managers[current.agent_name].handle(
+                _make_request(current, _accumulated(subtask_results))
+            )
+            subtask_results.append(
+                SubtaskResult(
+                    agent_name=current.agent_name,
+                    subtask=current.description,
+                    result=response.content,
+                    status=SubtaskStatus.COMPLETED,
                 )
-
-            elif checkpoint == HITLCheckpointType.TOOL_EXECUTION:
-                # User approved a tool execution — run the approved subtask,
-                # then continue to the next subtask (which will pause again).
-                decomposition_data = pending.get("decomposition", {})
-                decomposition = TaskDecomposition.model_validate(decomposition_data)
-                subtask_index = pending.get("subtask_index", 0)
-                completed_results = pending.get("completed_results", [])
-
-                # Restore already-completed subtask results
-                subtask_results = [
-                    SubtaskResult.model_validate(r) for r in completed_results
-                ]
-
-                # Execute the approved subtask NOW (don't re-enter the pause)
-                approved_planned = decomposition.subtasks[subtask_index]
-                logger.info(
-                    "Executing approved subtask %d: %s -> %s",
-                    subtask_index,
-                    approved_planned.agent_name,
-                    approved_planned.description[:60],
+            )
+            self._state.add_step(
+                agent_name=current.agent_name,
+                action=f"subtask_complete:{current.description[:60]}",
+                observation=response.content[:300],
+            )
+            if self.streaming_handler is not None:
+                self.streaming_handler.push_orchestration_step(
+                    agent_name=current.agent_name,
+                    kind="subtask_complete",
+                    message=f"{current.agent_name} completed",
                 )
-                result = await self._execute_subtask(approved_planned)
-                subtask_results.append(result)
-                self._state.add_step(
-                    agent_name=approved_planned.agent_name,
-                    action=f"subtask_complete:{approved_planned.description[:60]}",
-                    observation=str(result.result) if result.result else str(result.error),
-                )
-
-                # Continue from the NEXT subtask (which will hit HITL pause)
-                next_index = subtask_index + 1
-                if next_index >= len(decomposition.subtasks):
-                    # All subtasks done — aggregate
-                    final_answer = await self._aggregate_results(user_input, subtask_results)
-                    self._state.add_step(
-                        agent_name=self.name,
-                        action="orchestration_complete",
-                        observation=final_answer,
-                    )
-                    return SupervisorOutput(
-                        final_answer=final_answer,
-                        subtasks=subtask_results,
-                        decomposition=decomposition,
-                    )
-
-                return await self._execute_and_aggregate(
-                    user_input,
-                    decomposition,
-                    hitl_manager,
-                    enable_hitl=True,
-                    start_index=next_index,
-                    prior_results=subtask_results,
-                )
-
-            else:
-                logger.error("Unknown checkpoint type: %s", checkpoint)
-                return SupervisorOutput(
-                    final_answer="Error: Unknown HITL checkpoint type",
-                    subtasks=[],
-                )
-
         except Exception as e:
-            error_msg = f"Resume failed: {e}"
-            logger.error(error_msg, exc_info=True)
+            logger.error("Resume failed", exc_info=True)
             return SupervisorOutput(
-                final_answer=error_msg,
+                final_answer=f"Resume failed: {e}",
                 subtasks=[
                     SubtaskResult(
-                        agent_name="Supervisor",
+                        agent_name=plan.tasks[subtask_index].agent_name,
                         subtask=user_input,
                         result=None,
                         status=SubtaskStatus.FAILED,
@@ -317,274 +342,97 @@ class SupervisorAgent(BaseAgent):
                 ],
             )
 
-    async def _execute_and_aggregate(
-        self,
-        user_input: str,
-        decomposition: TaskDecomposition,
-        hitl_manager: HITLManager | None = None,
-        enable_hitl: bool = False,
-        start_index: int = 0,
-        prior_results: list[SubtaskResult] | None = None,
-    ) -> SupervisorOutput | None:
-        """Execute subtasks and aggregate, with optional HITL pauses before each tool.
-
-        Args:
-            user_input: The user's original request.
-            decomposition: The task decomposition plan.
-            hitl_manager: HITLManager for HITL state persistence.
-            enable_hitl: Whether to pause before each tool execution.
-            start_index: Index to start execution from (for resume).
-            prior_results: Already-completed results from previous run (for resume).
-
-        Returns:
-            SupervisorOutput if all complete, or None if paused.
-        """
-        subtask_results = list(prior_results) if prior_results else []
-
-        for i, planned in enumerate(decomposition.subtasks[start_index:], start=start_index):
-            # HITL Checkpoint 2: Tool execution confirmation
-            if enable_hitl and hitl_manager:
-                self._state.pause(
-                    checkpoint_type=HITLCheckpointType.TOOL_EXECUTION,
-                    pending_data={
-                        "decomposition": decomposition.model_dump(mode="json"),
-                        "subtask_index": i,
-                        "completed_results": [r.model_dump(mode="json") for r in subtask_results],
-                        "pending_tool": {
-                            "agent_name": planned.agent_name,
-                            "description": planned.description,
-                            "tools_needed": planned.tools_needed,
-                        },
-                    },
+        next_index = subtask_index + 1
+        if next_index >= len(plan.tasks):
+            # All done — synthesize the final answer.
+            responses = [
+                NewAgentResponse(
+                    agent_name=s.agent_name,
+                    content=str(s.result) if s.result is not None else "",
+                    data={},
                 )
-                self._state.tool = planned.agent_name
-                self._state.tool_path = f"Supervisor.{planned.agent_name}"
-                hitl_manager.capture_state(self._state)
-                logger.info(
-                    "HITL: Paused for tool confirmation — %s: %s",
-                    planned.agent_name,
-                    planned.description[:60],
-                )
-                return None
-
-            # Execute the subtask
-            result = await self._execute_subtask(planned)
-            subtask_results.append(result)
+                for s in subtask_results
+            ]
+            final_answer = await self._root._aggregate(user_input, responses)
             self._state.add_step(
-                agent_name=planned.agent_name,
-                action=f"subtask_complete:{planned.description[:60]}",
-                observation=str(result.result) if result.result else str(result.error),
+                agent_name=self.name,
+                action="orchestration_complete",
+                observation=final_answer,
+            )
+            return SupervisorOutput(
+                final_answer=final_answer,
+                subtasks=subtask_results,
+                decomposition=decomposition,
             )
 
-        # All subtasks complete — aggregate via LLM
-        final_answer = await self._aggregate_results(user_input, subtask_results)
-
-        self._state.add_step(
-            agent_name=self.name,
-            action="orchestration_complete",
-            observation=final_answer,
+        return self._repause_before_task(
+            hitl_manager,
+            plan=plan,
+            decomposition=decomposition,
+            subtask_index=next_index,
+            prior_subtasks=subtask_results,
         )
 
+    def _repause_before_task(
+        self,
+        hitl_manager: HITLManager,
+        *,
+        plan,
+        decomposition: TaskDecomposition,
+        subtask_index: int,
+        prior_subtasks: list[SubtaskResult],
+    ) -> None:
+        """Pause before the task at `subtask_index` and persist HITL state."""
+        next_task = plan.tasks[subtask_index]
+        self._state.pause(
+            checkpoint_type=HITLCheckpointType.TOOL_EXECUTION,
+            pending_data={
+                "decomposition": decomposition.model_dump(mode="json"),
+                "subtask_index": subtask_index,
+                "completed_results": [r.model_dump(mode="json") for r in prior_subtasks],
+                "pending_tool": {
+                    "agent_name": next_task.agent_name,
+                    "description": next_task.description,
+                    "tools_needed": next_task.tools_needed,
+                },
+            },
+        )
+        self._state.tool = next_task.agent_name
+        self._state.tool_path = f"RootSupervisorAgent.{next_task.agent_name}"
+        hitl_manager.capture_state(self._state)
+        return None
+
+    def _build_output(
+        self,
+        state: OrchestratorState,
+        response: NewAgentResponse,
+    ) -> SupervisorOutput:
+        """Project a finished `OrchestratorState` into the legacy output type."""
+        assert state.plan is not None
+        decomposition = _plan_to_decomposition(state)
+        subtasks = [_task_result_to_subtask(t) for t in state.plan.tasks]
         return SupervisorOutput(
-            final_answer=final_answer,
-            subtasks=subtask_results,
+            final_answer=state.final_answer or response.content,
+            subtasks=subtasks,
             decomposition=decomposition,
         )
 
-    async def orchestrate_manual(self, user_input: str) -> SupervisorOutput:
-        """Run orchestration with explicit manual decomposition and delegation.
 
-        Unlike orchestrate() which supports HITL checkpoints, this method
-        runs to completion without pausing. Useful for non-interactive contexts.
+def _make_request(task, context: dict[str, Any]):
+    """Build a new `AgentRequest` for a single task during HITL resume."""
+    from src.models.requests import AgentRequest
 
-        Args:
-            user_input: The user's message or task.
+    return AgentRequest(
+        query=task.description,
+        context=context,
+        parent_agent="RootSupervisorAgent",
+    )
 
-        Returns:
-            SupervisorOutput with results from each individually-executed subtask.
-        """
-        self.reset_state()
-        self._state.current_inputs = {"user_input": user_input}
-        logger.info("Supervisor starting manual orchestration for: %s", user_input[:100])
 
-        # Step 1: Use supervisor to decompose the task
-        decomposition = await self._decompose_task(user_input)
-        self._state.add_step(
-            agent_name=self.name,
-            action="task_decomposition",
-            action_input={"user_input": user_input},
-            observation=json.dumps(decomposition.model_dump(), default=str),
-        )
-
-        # Step 2: Execute each subtask via the appropriate child agent
-        subtask_results: list[SubtaskResult] = []
-        for planned in decomposition.subtasks:
-            result = await self._execute_subtask(planned)
-            subtask_results.append(result)
-
-        # Step 3: Aggregate results via LLM
-        final_answer = await self._aggregate_results(user_input, subtask_results)
-
-        self._state.add_step(
-            agent_name=self.name,
-            action="aggregation",
-            observation=final_answer,
-        )
-
-        return SupervisorOutput(
-            final_answer=final_answer,
-            subtasks=subtask_results,
-            decomposition=decomposition,
-        )
-
-    async def _decompose_task(self, user_input: str) -> TaskDecomposition:
-        """Use the supervisor's own LLM agent to decompose a task into subtasks.
-
-        The supervisor agent (with its system prompt and reasoning_step tool) is
-        invoked to analyze the request. The reasoning_step tool call captures the
-        structured plan, which is then parsed into a TaskDecomposition.
-        """
-        decomposition_prompt = f"""Analyze this user request and decompose it into subtasks.
-First use the reasoning_step tool to plan your approach, then respond with the
-decomposition as JSON.
-
-User request: {user_input}
-
-After using reasoning_step, respond ONLY with valid JSON in this exact format:
-{{
-    "reasoning": "your analysis here",
-    "subtasks": [
-        {{"agent_name": "AgentName", "description": "what to do", "tools_needed": ["tool1"]}}
-    ]
-}}"""
-
-        try:
-            result = await Runner.run(
-                self.agent,
-                input=decomposition_prompt,
-            )
-            raw = str(result.final_output)
-
-            # Parse JSON from the response
-            try:
-                # Try to extract JSON from potential markdown code blocks
-                if "```" in raw:
-                    json_str = raw.split("```")[1]
-                    if json_str.startswith("json"):
-                        json_str = json_str[4:]
-                    json_str = json_str.strip()
-                else:
-                    json_str = raw.strip()
-
-                parsed = json.loads(json_str)
-                planned_subtasks = [
-                    PlannedSubtask(
-                        agent_name=s.get("agent_name", "SimpleAgent"),
-                        description=s.get("description", ""),
-                        tools_needed=s.get("tools_needed", []),
-                    )
-                    for s in parsed.get("subtasks", [])
-                ]
-                return TaskDecomposition(
-                    original_request=user_input,
-                    reasoning=parsed.get("reasoning", ""),
-                    subtasks=planned_subtasks,
-                )
-            except (json.JSONDecodeError, KeyError, IndexError):
-                logger.warning("Could not parse decomposition JSON, creating fallback")
-                return self._fallback_decomposition(user_input)
-
-        except Exception as e:
-            logger.error("Task decomposition failed: %s", e)
-            return self._fallback_decomposition(user_input)
-
-    def _fallback_decomposition(self, user_input: str) -> TaskDecomposition:
-        """Create a simple fallback decomposition when LLM parsing fails."""
-        return TaskDecomposition(
-            original_request=user_input,
-            reasoning="Fallback: routing entire request to SimpleAgent",
-            subtasks=[
-                PlannedSubtask(
-                    agent_name="SimpleAgent",
-                    description=user_input,
-                    tools_needed=[],
-                )
-            ],
-        )
-
-    async def _execute_subtask(self, planned: PlannedSubtask) -> SubtaskResult:
-        """Execute a single planned subtask using the designated child agent."""
-        agent_name = planned.agent_name
-        child = self._child_agents.get(agent_name)
-
-        if child is None:
-            return SubtaskResult(
-                agent_name=agent_name,
-                subtask=planned.description,
-                result=None,
-                status=SubtaskStatus.FAILED,
-                error=f"Unknown agent: {agent_name}",
-            )
-
-        self._state.tool_path = f"Supervisor.{agent_name}"
-        logger.info("Delegating to %s: %s", agent_name, planned.description[:80])
-
-        try:
-            output = await child.run(planned.description)
-            return SubtaskResult(
-                agent_name=agent_name,
-                subtask=planned.description,
-                result=output,
-                status=SubtaskStatus.COMPLETED,
-            )
-        except Exception as e:
-            return SubtaskResult(
-                agent_name=agent_name,
-                subtask=planned.description,
-                result=None,
-                status=SubtaskStatus.FAILED,
-                error=str(e),
-            )
-
-    async def _aggregate_results(
-        self, user_input: str, results: list[SubtaskResult]
-    ) -> str:
-        """Use the supervisor's LLM to synthesize subtask results into a final answer.
-
-        The supervisor agent is invoked with the original request and all subtask
-        outputs, producing a coherent, user-facing summary.
-        """
-        # Build a structured summary of what each agent returned
-        result_parts = []
-        for r in results:
-            if r.is_success:
-                result_parts.append(f"- {r.agent_name} ({r.subtask}): {r.result}")
-            else:
-                result_parts.append(f"- {r.agent_name} ({r.subtask}): FAILED — {r.error}")
-
-        if not result_parts:
-            return "No subtasks were executed."
-
-        results_summary = "\n".join(result_parts)
-
-        synthesis_prompt = f"""The following subtasks have been completed for the user's request.
-Synthesize the results into a single, clear, natural answer for the user.
-
-Original user request: {user_input}
-
-Subtask results:
-{results_summary}
-
-Produce a clean, conversational answer. Do NOT include agent names, internal
-references, or formatting like "[AgentName]". Just answer the user naturally."""
-
-        try:
-            result = await Runner.run(
-                self.agent,
-                input=synthesis_prompt,
-            )
-            return str(result.final_output)
-        except Exception as e:
-            logger.warning("LLM aggregation failed, falling back to simple join: %s", e)
-            # Fallback to simple concatenation if LLM call fails
-            return results_summary
+def _accumulated(prior: list[SubtaskResult]) -> dict[str, Any]:
+    """Build the context dict downstream tasks see during HITL resume."""
+    return {
+        "previous_results": [
+            {"agent": r.agent_name, "result": r.result} for r in prior
+        ],
+    }
