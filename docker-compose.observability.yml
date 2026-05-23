@@ -1,0 +1,55 @@
+# Observability stack — Prometheus + Grafana + Tempo + OTel Collector.
+#
+#   docker compose -f docker-compose.observability.yml up -d
+#
+# Then run the app with:
+#   OBS_ENABLED=true OBS_TRACE_EXPORTER=otlp \
+#   OBS_OTLP_ENDPOINT=http://localhost:4317 streamlit run main.py
+#
+# All open-source, no vendor lock-in: swap Tempo for Jaeger by editing
+# only the collector exporter, and Grafana reads Prometheus + Tempo as
+# standard data sources.
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.0
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./src/observability/dashboards/otel-collector.yaml:/etc/otel-collector.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC (app → collector)
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # collector self-metrics
+    depends_on:
+      - tempo
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./src/observability/dashboards/tempo.yaml:/etc/tempo.yaml:ro
+    ports:
+      - "3200:3200"   # Tempo query API
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ./src/observability/dashboards/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./src/observability/dashboards/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./src/observability/dashboards/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - tempo

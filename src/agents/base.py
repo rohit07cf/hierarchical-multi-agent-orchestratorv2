@@ -38,6 +38,7 @@ from src.models.trace import (
     ToolInvocation,
     ToolSpec,
 )
+from src.observability.middleware import observe_agent, observe_tool
 
 logger = logging.getLogger(__name__)
 
@@ -63,36 +64,52 @@ class ReasoningAgent(ABC):
         return [t.name for t in self.tools]
 
     async def handle(self, request: AgentRequest) -> AgentResponse:
-        """Run the reason → execute → synthesize loop and return the response."""
-        self._reset_run_state()
-        self._log(f"Reasoning over request: {request.query[:80]!r}")
-        reasoning = await self._reason(request)
-        self._log(f"Reasoning: {reasoning.reasoning[:120]}")
+        """Run the reason → execute → synthesize loop and return the response.
 
-        invocations = await self._execute_tools(reasoning.selected_tools)
-        for inv in invocations:
-            status = "ok" if inv.success else "ERROR"
-            self._log(f"Tool {inv.tool_name} [{status}]: {inv.result_preview[:80]}")
+        The whole invocation is wrapped in an ``agent.handle`` span (which
+        also pushes this agent onto the correlation ``agent_path``), so a
+        manager delegating to a worker produces a clean parent-child span
+        tree that mirrors the hierarchy.
+        """
+        async with observe_agent(self.name) as obs:
+            self._reset_run_state()
+            self._log(f"Reasoning over request: {request.query[:80]!r}")
+            reasoning = await self._reason(request)
+            self._log(f"Reasoning: {reasoning.reasoning[:120]}")
 
-        final = await self._synthesize(request, reasoning, invocations)
-        self._log(f"Final response generated ({len(final)} chars)")
+            skipped = reasoning.skipped_tools or self._infer_skipped(reasoning)
+            selected = [d.tool_name for d in reasoning.selected_tools]
+            obs.set_tools(self.name, selected, skipped)
 
-        trace = AgentTrace(
-            agent_name=self.name,
-            llm_mode=self.llm.mode,
-            reasoning=reasoning.reasoning,
-            available_tools=self.available_tools,
-            selected_tools=[d.tool_name for d in reasoning.selected_tools],
-            skipped_tools=reasoning.skipped_tools or self._infer_skipped(reasoning),
-            tool_invocations=invocations,
-            final_response=final,
-        )
-        return AgentResponse(
-            agent_name=self.name,
-            content=final,
-            data=self._extra_data(invocations),
-            trace=trace.model_dump(mode="json"),
-        )
+            invocations = await self._execute_tools(reasoning.selected_tools)
+            for inv in invocations:
+                status = "ok" if inv.success else "ERROR"
+                self._log(f"Tool {inv.tool_name} [{status}]: {inv.result_preview[:80]}")
+
+            final = await self._synthesize(request, reasoning, invocations)
+            self._log(f"Final response generated ({len(final)} chars)")
+
+            # An agent "fails" if every tool it chose to run errored.
+            obs.set_success(
+                not invocations or any(inv.success for inv in invocations)
+            )
+
+            trace = AgentTrace(
+                agent_name=self.name,
+                llm_mode=self.llm.mode,
+                reasoning=reasoning.reasoning,
+                available_tools=self.available_tools,
+                selected_tools=selected,
+                skipped_tools=skipped,
+                tool_invocations=invocations,
+                final_response=final,
+            )
+            return AgentResponse(
+                agent_name=self.name,
+                content=final,
+                data=self._extra_data(invocations),
+                trace=trace.model_dump(mode="json"),
+            )
 
     # ----------------- Subclass hooks -----------------
 
@@ -161,31 +178,37 @@ class ReasoningAgent(ABC):
     async def _call_tool(
         self, spec: ToolSpec, decision: ToolDecision
     ) -> ToolInvocation:
-        try:
-            result = spec.handler(**decision.arguments)
-            # Support async handlers (e.g. when the "tool" delegates to
-            # another agent's handle()).
-            if hasattr(result, "__await__"):
-                result = await result
-            return ToolInvocation(
-                tool_name=spec.name,
-                arguments=decision.arguments,
-                rationale=decision.rationale,
-                result=result,
-                result_preview=self._preview(result),
-                success=True,
-            )
-        except Exception as e:
-            logger.exception("Tool %s raised", spec.name)
-            return ToolInvocation(
-                tool_name=spec.name,
-                arguments=decision.arguments,
-                rationale=decision.rationale,
-                result=None,
-                result_preview="",
-                success=False,
-                error=str(e),
-            )
+        # A "tool" may be a deterministic function *or* a delegation to a
+        # child agent's handle(); either way we time it and tag success.
+        # Tool exceptions are caught and returned as failed invocations, so
+        # ``observe_tool`` records the failure without aborting the agent.
+        async with observe_tool(spec.name, self.name, decision.rationale) as tool_obs:
+            try:
+                result = spec.handler(**decision.arguments)
+                if hasattr(result, "__await__"):
+                    result = await result
+                preview = self._preview(result)
+                tool_obs.set_result(True, preview)
+                return ToolInvocation(
+                    tool_name=spec.name,
+                    arguments=decision.arguments,
+                    rationale=decision.rationale,
+                    result=result,
+                    result_preview=preview,
+                    success=True,
+                )
+            except Exception as e:
+                logger.exception("Tool %s raised", spec.name)
+                tool_obs.set_result(False)
+                return ToolInvocation(
+                    tool_name=spec.name,
+                    arguments=decision.arguments,
+                    rationale=decision.rationale,
+                    result=None,
+                    result_preview="",
+                    success=False,
+                    error=str(e),
+                )
 
     async def _synthesize(
         self,

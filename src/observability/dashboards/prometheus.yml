@@ -1,0 +1,18 @@
+# Prometheus scrape config for the orchestrator.
+# The app exposes /metrics on :9108 (OBS_METRICS_PORT).
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: hmao-orchestrator
+    static_configs:
+      - targets: ["app:9108"]
+        labels:
+          service: hmao-orchestrator
+          env: dev
+
+  # The OTel collector can also expose its own internal metrics.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]

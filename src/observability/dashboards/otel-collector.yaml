@@ -1,0 +1,46 @@
+# OpenTelemetry Collector — the vendor-neutral seam.
+# The app exports OTLP/gRPC here; the collector fans traces out to Tempo
+# (or Jaeger). Swap the exporter block to change backends without
+# touching a line of application code — that is the whole point of OTLP.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 2s
+  # Tail sampling example: keep every errored or slow trace, sample the
+  # rest. In a portfolio demo we keep everything; in prod this is how you
+  # control trace volume without losing the traces that matter.
+  # tail_sampling:
+  #   policies:
+  #     - name: errors
+  #       type: status_code
+  #       status_code: {status_codes: [ERROR]}
+  #     - name: slow
+  #       type: latency
+  #       latency: {threshold_ms: 5000}
+
+exporters:
+  # Traces → Tempo (OTLP). Point at Jaeger/Grafana Cloud instead by
+  # editing only this block.
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  debug:
+    verbosity: normal
+
+service:
+  telemetry:
+    metrics:
+      address: 0.0.0.0:8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/tempo, debug]

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from src.agents.base import ReasoningAgent
@@ -35,6 +36,10 @@ from src.models.state_models import (
     ExecutionStepKind,
     OrchestratorState,
 )
+from src.observability.context import correlation_scope
+from src.observability.metrics import registry as M
+from src.observability.tracing import attributes as A
+from src.observability.tracing import span
 from src.orchestrator.execution_engine import ExecutionEngine, PreSubtaskHook
 from src.orchestrator.router import Router
 
@@ -140,15 +145,45 @@ class RootSupervisorAgent:
 
         Returns `(manager_name, reasoning)` where `manager_name` is None
         when the supervisor decides no further work is needed.
+
+        This is the hottest debugging surface in the system: routing loops,
+        the wrong manager firing, or an agent never being reached all start
+        here. We span it, time it, and record which manager was picked and
+        whether the decision came from the LLM or the deterministic router.
         """
-        if self.llm.enabled:
+        turn = len(prior)
+        async with span(
+            A.SPAN_ROUTING, attributes={A.ROUTE_TURN: turn}
+        ) as sp:
+            start = time.perf_counter()
+            source = "llm"
             try:
-                return await self._llm_decide_next(user_query, prior)
-            except Exception as e:
-                logger.warning(
-                    "LLM next-step decision failed, using router fallback: %s", e
-                )
-        return self._router_decide_next(user_query, prior)
+                if self.llm.enabled:
+                    try:
+                        manager, reasoning = await self._llm_decide_next(
+                            user_query, prior
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "LLM next-step decision failed, using router fallback: %s",
+                            e,
+                        )
+                        source = "router_fallback"
+                        manager, reasoning = self._router_decide_next(user_query, prior)
+                else:
+                    source = "router_fallback"
+                    manager, reasoning = self._router_decide_next(user_query, prior)
+            finally:
+                M.ROUTING_LATENCY.labels(source).observe(time.perf_counter() - start)
+
+            decision_label = manager or "finish"
+            M.ROUTING_DECISIONS_TOTAL.labels(decision_label, source).inc()
+            if manager:
+                M.MANAGER_SELECTION.labels(manager).inc()
+            sp.set_attribute(A.ROUTE_NEXT_MANAGER, decision_label)
+            sp.set_attribute(A.ROUTE_DECISION_SOURCE, source)
+            sp.set_attribute(A.ROUTE_REASONING, reasoning[:200])
+            return manager, reasoning
 
     def _router_decide_next(
         self, user_query: str, prior: list[tuple[str, str]]
@@ -217,10 +252,67 @@ class RootSupervisorAgent:
         *,
         pre_subtask: PreSubtaskHook | None = None,
     ) -> tuple[OrchestratorState, AgentResponse]:
-        """Run the dynamic routing loop and aggregate the final answer."""
+        """Instrumented entry point — the root span for an entire run.
+
+        Owns the request-scoped correlation context (``request_id`` ==
+        ``state_id``), the in-flight gauge, the terminal-status counters,
+        and the end-to-end duration histogram. The actual routing loop
+        lives in ``_run_orchestration`` so every agent/tool/LLM span nests
+        under this one and shares the same trace.
+        """
+        from opentelemetry.trace import SpanKind
+
         state = OrchestratorState(user_query=user_query, status="planning")
         self.state = state
 
+        M.ACTIVE_ORCHESTRATIONS.inc()
+        start = time.perf_counter()
+        with correlation_scope(request_id=state.state_id):
+            async with span(
+                A.SPAN_ORCHESTRATION,
+                kind=SpanKind.SERVER,
+                attributes={
+                    A.ORCH_QUERY_PREVIEW: user_query[:120],
+                    A.ORCH_QUERY_LEN: len(user_query),
+                },
+            ) as sp:
+                try:
+                    result_state, response = await self._run_orchestration(
+                        state, user_query, pre_subtask=pre_subtask
+                    )
+                except Exception as exc:
+                    M.ORCHESTRATION_FAILURES.labels(type(exc).__name__).inc()
+                    raise
+                finally:
+                    M.ACTIVE_ORCHESTRATIONS.dec()
+                    status = state.status
+                    M.ORCHESTRATION_TOTAL.labels(status).inc()
+                    M.ORCHESTRATION_DURATION.labels(status).observe(
+                        time.perf_counter() - start
+                    )
+                turns = sum(
+                    1
+                    for s in state.steps
+                    if s.kind == ExecutionStepKind.SUBTASK_COMPLETE
+                )
+                M.ORCHESTRATION_TURNS.observe(turns)
+                sp.set_attribute(A.ORCH_STATUS, state.status)
+                sp.set_attribute(A.ORCH_TURNS, turns)
+                if state.plan:
+                    sp.set_attribute(
+                        A.ORCH_MANAGERS,
+                        [t.agent_name for t in state.plan.tasks],
+                    )
+                return result_state, response
+
+    async def _run_orchestration(
+        self,
+        state: OrchestratorState,
+        user_query: str,
+        *,
+        pre_subtask: PreSubtaskHook | None = None,
+    ) -> tuple[OrchestratorState, AgentResponse]:
+        """Run the dynamic routing loop and aggregate the final answer."""
         plan = await self.plan(user_query)
         state.plan = plan
         state.add_step(
@@ -270,6 +362,7 @@ class RootSupervisorAgent:
                 proceed = await pre_subtask(idx, task, state)
                 if not proceed:
                     state.status = "paused"
+                    M.HITL_PAUSED.labels("before_subtask").inc()
                     return state, AgentResponse(
                         agent_name=self.name,
                         content="Execution paused for review.",
@@ -326,6 +419,22 @@ class RootSupervisorAgent:
         """Resume a paused orchestration from `start_index` (HITL path)."""
         assert state.plan is not None, "Cannot resume without a plan"
         self.state = state
+        # Re-bind the original run's correlation id so the resumed spans/logs
+        # join the same logical request as the pre-pause portion.
+        M.HITL_RESUMES.labels("approve").inc()
+        with correlation_scope(request_id=state.state_id):
+            return await self._resume_impl(
+                state, start_index, pre_subtask=pre_subtask
+            )
+
+    async def _resume_impl(
+        self,
+        state: OrchestratorState,
+        start_index: int,
+        *,
+        pre_subtask: PreSubtaskHook | None = None,
+    ) -> tuple[OrchestratorState, AgentResponse]:
+        assert state.plan is not None
         state.status = "running"
 
         plan = state.plan
@@ -369,6 +478,7 @@ class RootSupervisorAgent:
                 proceed = await pre_subtask(idx, task, state)
                 if not proceed:
                     state.status = "paused"
+                    M.HITL_PAUSED.labels("before_subtask").inc()
                     return state, AgentResponse(
                         agent_name=self.name,
                         content="Execution paused again for review.",
@@ -411,21 +521,25 @@ class RootSupervisorAgent:
         if not responses:
             return "No subtasks were executed."
 
-        if self.llm.enabled:
-            try:
-                return await self._llm_aggregate(user_query, responses)
-            except Exception as e:
-                logger.warning("LLM aggregator failed, falling back: %s", e)
+        async with span(
+            A.SPAN_AGGREGATION,
+            attributes={"hmao.aggregate.inputs": len(responses)},
+        ):
+            if self.llm.enabled:
+                try:
+                    return await self._llm_aggregate(user_query, responses)
+                except Exception as e:
+                    logger.warning("LLM aggregator failed, falling back: %s", e)
 
-        parts: list[str] = []
-        for r in responses:
-            if r.agent_name == "ResearchManagerAgent":
-                parts.append(f"Research: {r.content}")
-            elif r.agent_name == "BuildManagerAgent":
-                parts.append(f"Implementation:\n{r.content}")
-            else:
-                parts.append(r.content)
-        return "\n\n".join(parts)
+            parts: list[str] = []
+            for r in responses:
+                if r.agent_name == "ResearchManagerAgent":
+                    parts.append(f"Research: {r.content}")
+                elif r.agent_name == "BuildManagerAgent":
+                    parts.append(f"Implementation:\n{r.content}")
+                else:
+                    parts.append(r.content)
+            return "\n\n".join(parts)
 
     async def _llm_aggregate(
         self, user_query: str, responses: list[AgentResponse]

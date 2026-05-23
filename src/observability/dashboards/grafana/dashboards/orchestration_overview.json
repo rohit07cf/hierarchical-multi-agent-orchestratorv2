@@ -1,0 +1,74 @@
+{
+  "title": "HMAO — Orchestration Overview",
+  "uid": "hmao-orchestration",
+  "tags": ["hmao", "orchestration"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Active orchestrations",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "active_orchestrations", "refId": "A" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Run rate (per min)",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(orchestration_total[5m])) * 60", "refId": "A" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Error %",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percent", "thresholds": { "steps": [
+        { "color": "green", "value": null }, { "color": "red", "value": 5 } ] } } },
+      "targets": [
+        { "expr": "100 * sum(rate(orchestration_total{status=\"error\"}[5m])) / clamp_min(sum(rate(orchestration_total[5m])), 0.001)", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Orchestration latency (p50 / p95 / p99)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(orchestration_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(orchestration_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, sum(rate(orchestration_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99", "refId": "C" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Runs by terminal status",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "expr": "sum(rate(orchestration_total[5m])) by (status)", "legendFormat": "{{status}}", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Routing turns per run (p95)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "description": "A creeping p95 toward MAX_TURNS (6) is the early signal of routing loops.",
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(orchestration_turns_bucket[5m])) by (le))", "legendFormat": "p95 turns", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Manager selection distribution",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        { "expr": "sum(rate(manager_selection_total[5m])) by (manager)", "legendFormat": "{{manager}}", "refId": "A" }
+      ]
+    }
+  ]
+}

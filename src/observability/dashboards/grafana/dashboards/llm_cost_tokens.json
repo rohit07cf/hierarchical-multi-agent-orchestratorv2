@@ -1,0 +1,65 @@
+{
+  "title": "HMAO — LLM Cost & Tokens",
+  "uid": "hmao-llm-cost",
+  "tags": ["hmao", "llm", "cost"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Spend rate ($/hr)",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+      "targets": [
+        { "expr": "sum(rate(llm_cost_estimate_usd_total[5m])) * 3600", "refId": "A" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Cost per orchestration ($)",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+      "targets": [
+        { "expr": "sum(rate(llm_cost_estimate_usd_total[5m])) / clamp_min(sum(rate(orchestration_total[5m])), 0.001)", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cost rate by model",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+      "targets": [
+        { "expr": "sum(rate(llm_cost_estimate_usd_total[5m])) by (model)", "legendFormat": "{{model}}", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Tokens/sec (input vs output) by operation",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "sum(rate(llm_tokens_input_total[5m])) by (operation)", "legendFormat": "in:{{operation}}", "refId": "A" },
+        { "expr": "sum(rate(llm_tokens_output_total[5m])) by (operation)", "legendFormat": "out:{{operation}}", "refId": "B" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM latency p95 by operation",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(llm_request_duration_seconds_bucket[5m])) by (le, operation))", "legendFormat": "{{operation}}", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM failure rate (real-mode fallbacks)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "sum(rate(llm_failures_total[5m])) by (operation)", "legendFormat": "{{operation}}", "refId": "A" }
+      ]
+    }
+  ]
+}

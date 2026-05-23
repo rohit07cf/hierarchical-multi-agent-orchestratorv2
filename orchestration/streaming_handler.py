@@ -15,6 +15,11 @@ from typing import Any
 
 from models.streaming_models import StreamingModelResponseStep, StreamingStatus
 
+try:
+    from src.observability.metrics import registry as _M
+except Exception:  # noqa: BLE001 — observability is optional for the UI bridge
+    _M = None
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -54,6 +59,8 @@ class StreamingCallbackHandler(_Base):  # type: ignore[misc, valid-type]
         if not self._is_active:
             return
         self._buffer.append(step)
+        if _M is not None:
+            _M.STREAMING_QUEUE_DEPTH.set(len(self._buffer))
 
     async def _emit(self, step: StreamingModelResponseStep) -> None:
         """Async emit, also feeding the queue for live consumers."""
@@ -143,6 +150,8 @@ class StreamingCallbackHandler(_Base):  # type: ignore[misc, valid-type]
             "error": StreamingStatus.ERROR,
             "info": StreamingStatus.IN_PROGRESS,
         }
+        if _M is not None:
+            _M.STREAMING_EVENTS.labels(kind).inc()
         self.emit_step(
             StreamingModelResponseStep(
                 status=status_map.get(kind, StreamingStatus.IN_PROGRESS),

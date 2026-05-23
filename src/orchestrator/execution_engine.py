@@ -20,6 +20,8 @@ from src.models.state_models import (
     OrchestratorState,
     TaskStatus,
 )
+from src.observability.tracing import attributes as A
+from src.observability.tracing import span
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,26 @@ class ExecutionEngine:
 
         Returns the produced `AgentResponse`, or `None` if the task failed
         (in which case the failure is recorded on the timeline).
+
+        Wrapped in an ``engine.run_task`` span — the supervisor's view of
+        dispatching one manager — so the manager's own ``agent.handle``
+        span (and everything below it) nests cleanly under the dispatch.
         """
+        async with span(
+            A.SPAN_SUBTASK,
+            attributes={
+                A.AGENT_NAME: task.agent_name,
+                A.AGENT_LAYER: A.layer_for(task.agent_name),
+            },
+        ):
+            return await self._dispatch(task, state, accumulated_context)
+
+    async def _dispatch(
+        self,
+        task: AgentTask,
+        state: OrchestratorState,
+        accumulated_context: dict,
+    ) -> AgentResponse | None:
         agent = self._agents.get(task.agent_name)
         if agent is None:
             task.status = TaskStatus.FAILED

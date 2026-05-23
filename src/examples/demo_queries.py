@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.models.state_models import OrchestratorState  # noqa: E402
+from src.observability import init_observability  # noqa: E402
 from src.orchestrator.supervisor import RootSupervisorAgent  # noqa: E402
 
 DEMO_QUERIES: list[str] = [
@@ -87,6 +88,9 @@ def _print_state(state: OrchestratorState) -> None:
 
 async def run_demo() -> None:
     """Iterate through `DEMO_QUERIES` and print results."""
+    # Wire observability from the environment. With OBS_ENABLED unset this
+    # is a no-op beyond structured logging, so the demo runs unchanged.
+    init_observability()
     if not os.environ.get("OPENAI_API_KEY"):
         print(
             "WARNING: OPENAI_API_KEY is not set — agents run in mock mode. "

@@ -13,6 +13,7 @@ from src.models.trace import (
     ToolInvocation,
     ToolSpec,
 )
+from src.observability.metrics import registry as M
 from src.tools.code_review_tool import review_code
 from src.tools.security_review_tool import scan_security
 from src.tools.test_gap_tool import scan_test_gaps
@@ -124,6 +125,13 @@ class ReviewAgent(ReasoningAgent):
 
     def _extra_data(self, invocations: list[ToolInvocation]) -> dict[str, Any]:
         review = self._build_aggregate_review(invocations)
+        # Surface review quality as metrics: a spike in blocker-severity or
+        # security findings is a code-quality regression signal, sliceable
+        # in Grafana over time.
+        for f in review.findings:
+            M.REVIEW_FINDINGS.labels(f.severity.value).inc()
+            if f.category == "security":
+                M.SECURITY_FINDINGS.labels(f.severity.value).inc()
         return {"review": review.model_dump(mode="json")}
 
     @staticmethod

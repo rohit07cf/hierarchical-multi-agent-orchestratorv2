@@ -14,6 +14,17 @@ python-dotenv>=1.0.1
 # Optional: real LLM completions (only used when OPENAI_API_KEY is set).
 openai>=1.66.0
 
+# Observability — OpenTelemetry (traces) + Prometheus (metrics) +
+# structlog (structured logs). All open standards, no vendor SDKs.
+# Instrumentation is a no-op until OBS_ENABLED=true, so these are safe
+# defaults even for the offline demo.
+opentelemetry-api>=1.27.0
+opentelemetry-sdk>=1.27.0
+opentelemetry-exporter-otlp-proto-grpc>=1.27.0
+prometheus-client>=0.21.0
+structlog>=24.4.0
+psutil>=6.0.0
+
 # Optional: legacy openai-agents SDK — only required by the old
 # agent_defs/{simple,math,echo,classifier}_agent.py modules. The new
 # 3-layer hierarchy does not depend on it.

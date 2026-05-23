@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     # Streamlit
     streamlit_port: int = Field(default=8501, description="Streamlit server port")
 
+    # Observability (see src/observability/config.py for the runtime resolver).
+    # These mirror the OBS_* env vars so settings can be inspected centrally;
+    # the observability package reads the env directly at init time.
+    obs_enabled: bool = Field(default=False, description="Enable tracing + metrics export")
+    obs_trace_exporter: str = Field(default="console", description="otlp | console | none")
+    obs_otlp_endpoint: str = Field(default="http://localhost:4317", description="OTLP gRPC endpoint")
+    obs_metrics_port: int = Field(default=9108, description="Prometheus /metrics port")
+    obs_log_json: bool = Field(default=True, description="Emit JSON structured logs")
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

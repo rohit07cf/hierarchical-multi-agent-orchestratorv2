@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent_defs.supervisor import SupervisorAgent
 from config.settings import get_settings
+from src.observability import init_observability
 from models.agent_state import HITLAction, HITLActionType
 from models.supervisor_output import SupervisorOutput
 from orchestration.agent_tree import AgentTree
@@ -27,6 +28,7 @@ from ui.components import (
     render_model_selector,
     render_streaming_output,
 )
+from ui.observability_panel import render_observability_panel
 from ui.visualizations import (
     render_agent_state,
     render_agent_traces_for_subtasks,
@@ -35,7 +37,6 @@ from ui.visualizations import (
     render_reasoning_panel,
     render_subtask_table,
 )
-from utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,10 @@ def render_main_content(model: str) -> None:
         with st.expander("Streaming Log", expanded=False):
             render_streaming_output(st.session_state["streaming_steps"])
 
+    # Live observability metrics (read from the in-process Prometheus registry)
+    with st.expander("📊 Observability Metrics", expanded=False):
+        render_observability_panel()
+
     # HITL controls — shown when execution is paused
     hitl_manager: HITLManager = st.session_state["hitl_manager"]
     hitl_action = render_hitl_controls(hitl_manager)
@@ -248,7 +253,10 @@ def run_app() -> None:
         initial_sidebar_state="expanded",
     )
 
-    setup_logging(get_settings().log_level)
+    # Idempotent: configures structured logging always, and tracing +
+    # the /metrics server when OBS_ENABLED=true. Metrics are collected
+    # in-process either way, which is what powers the panel below.
+    init_observability()
     init_session_state()
 
     st.title("Hierarchical Multi-Agent Orchestrator")

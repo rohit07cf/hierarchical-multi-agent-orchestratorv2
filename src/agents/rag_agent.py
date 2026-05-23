@@ -12,6 +12,7 @@ from src.models.trace import (
     ToolInvocation,
     ToolSpec,
 )
+from src.observability.middleware import observe_retrieval
 from src.tools.document_loader import load_knowledge_base
 from src.tools.simple_retriever import SimpleRetriever
 
@@ -85,15 +86,27 @@ class RAGAgent(ReasoningAgent):
 
     # ----------------- Tool handlers -----------------
 
-    def _tool_retrieve(self, query: str, top_k: int | None = None) -> dict:
-        docs = self._retriever.retrieve(query, top_k=top_k or self._top_k)
-        return {
-            "count": len(docs),
-            "documents": [
-                {"name": d.name, "score": d.score, "text": d.text}
-                for d in docs
-            ],
-        }
+    async def _tool_retrieve(self, query: str, top_k: int | None = None) -> dict:
+        k = top_k or self._top_k
+        # RAG needs its own span + quality signals: latency alone hides the
+        # failures that matter (relevant-but-slow vs fast-but-empty). We
+        # record docs returned, the best relevance score, and context size.
+        async with observe_retrieval(query, k) as obs:
+            docs = self._retriever.retrieve(query, top_k=k)
+            top_score = max((d.score for d in docs), default=0.0)
+            context_chars = sum(len(d.text) for d in docs)
+            obs.record(
+                docs_returned=len(docs),
+                top_score=top_score,
+                context_chars=context_chars,
+            )
+            return {
+                "count": len(docs),
+                "documents": [
+                    {"name": d.name, "score": d.score, "text": d.text}
+                    for d in docs
+                ],
+            }
 
     def _tool_list(self) -> dict:
         return {

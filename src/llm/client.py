@@ -30,6 +30,7 @@ from src.models.trace import (
     ToolInvocation,
     ToolSpec,
 )
+from src.observability.middleware import observe_llm
 
 logger = logging.getLogger(__name__)
 
@@ -68,33 +69,39 @@ class LLMClient:
         In mock mode, defers to `mock_policy` if supplied, otherwise
         returns a labelled "skip all tools" reasoning.
         """
-        if self.mode == LLMMode.MOCK:
-            if mock_policy is not None:
-                reasoning = mock_policy()
-                # Always tag mock reasoning so the UI shows the mode.
-                if not reasoning.reasoning.startswith(MOCK_PREFIX):
-                    reasoning.reasoning = f"{MOCK_PREFIX} {reasoning.reasoning}"
+        async with observe_llm(self.model, "reason", self.mode.value) as obs:
+            if self.mode == LLMMode.MOCK:
+                if mock_policy is not None:
+                    reasoning = mock_policy()
+                    # Always tag mock reasoning so the UI shows the mode.
+                    if not reasoning.reasoning.startswith(MOCK_PREFIX):
+                        reasoning.reasoning = f"{MOCK_PREFIX} {reasoning.reasoning}"
+                else:
+                    reasoning = AgentReasoning(
+                        reasoning=(
+                            f"{MOCK_PREFIX} {agent_name} running in mock mode. "
+                            "Set OPENAI_API_KEY for real reasoning."
+                        ),
+                        selected_tools=[],
+                        skipped_tools=[t.name for t in available_tools],
+                    )
+                obs.record_usage(
+                    prompt_text=user_prompt, completion_text=reasoning.reasoning
+                )
                 return reasoning
-            return AgentReasoning(
-                reasoning=(
-                    f"{MOCK_PREFIX} {agent_name} running in mock mode. "
-                    "Set OPENAI_API_KEY for real reasoning."
-                ),
-                selected_tools=[],
-                skipped_tools=[t.name for t in available_tools],
-            )
 
-        try:
-            return await self._openai_reason(
-                agent_name, system_prompt, user_prompt, available_tools
-            )
-        except Exception as e:
-            logger.warning("LLM reason() failed, falling back to mock: %s", e)
-            return AgentReasoning(
-                reasoning=f"{MOCK_PREFIX} LLM call failed ({e}); using empty plan.",
-                selected_tools=[],
-                skipped_tools=[t.name for t in available_tools],
-            )
+            try:
+                return await self._openai_reason(
+                    agent_name, system_prompt, user_prompt, available_tools, obs
+                )
+            except Exception as e:
+                logger.warning("LLM reason() failed, falling back to mock: %s", e)
+                obs.mark_failure()
+                return AgentReasoning(
+                    reasoning=f"{MOCK_PREFIX} LLM call failed ({e}); using empty plan.",
+                    selected_tools=[],
+                    skipped_tools=[t.name for t in available_tools],
+                )
 
     async def synthesize(
         self,
@@ -106,18 +113,23 @@ class LLMClient:
         mock_policy: MockSynthPolicy | None = None,
     ) -> str:
         """Synthesize the agent's final user-facing response."""
-        if self.mode == LLMMode.MOCK:
-            if mock_policy is not None:
-                return mock_policy(tool_results)
-            return self._default_mock_synthesize(agent_name, tool_results)
+        async with observe_llm(self.model, "synthesize", self.mode.value) as obs:
+            if self.mode == LLMMode.MOCK:
+                if mock_policy is not None:
+                    out = mock_policy(tool_results)
+                else:
+                    out = self._default_mock_synthesize(agent_name, tool_results)
+                obs.record_usage(prompt_text=user_prompt, completion_text=out)
+                return out
 
-        try:
-            return await self._openai_synthesize(
-                system_prompt, user_prompt, tool_results
-            )
-        except Exception as e:
-            logger.warning("LLM synthesize() failed, falling back to mock: %s", e)
-            return self._default_mock_synthesize(agent_name, tool_results)
+            try:
+                return await self._openai_synthesize(
+                    system_prompt, user_prompt, tool_results, obs
+                )
+            except Exception as e:
+                logger.warning("LLM synthesize() failed, falling back to mock: %s", e)
+                obs.mark_failure()
+                return self._default_mock_synthesize(agent_name, tool_results)
 
     # ----------------- OpenAI implementations -----------------
 
@@ -127,6 +139,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         available_tools: list[ToolSpec],
+        obs,
     ) -> AgentReasoning:
         """Real OpenAI reasoning call — asks for JSON-formatted decision."""
         from openai import AsyncOpenAI
@@ -159,6 +172,14 @@ class LLMClient:
             response_format={"type": "json_object"},
             temperature=0.1,
         )
+        # Prefer real provider usage; fall back to the char-heuristic.
+        usage = getattr(response, "usage", None)
+        obs.record_usage(
+            input_tokens=getattr(usage, "prompt_tokens", None),
+            output_tokens=getattr(usage, "completion_tokens", None),
+            prompt_text=user_prompt,
+            completion_text=response.choices[0].message.content,
+        )
         raw = response.choices[0].message.content or "{}"
         parsed = json.loads(raw)
         return AgentReasoning(
@@ -179,6 +200,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         tool_results: list[ToolInvocation],
+        obs,
     ) -> str:
         """Real OpenAI synthesis call — free-form completion."""
         from openai import AsyncOpenAI
@@ -208,7 +230,15 @@ class LLMClient:
             ],
             temperature=0.2,
         )
-        return response.choices[0].message.content or ""
+        usage = getattr(response, "usage", None)
+        content = response.choices[0].message.content or ""
+        obs.record_usage(
+            input_tokens=getattr(usage, "prompt_tokens", None),
+            output_tokens=getattr(usage, "completion_tokens", None),
+            prompt_text=prompt,
+            completion_text=content,
+        )
+        return content
 
     # ----------------- Default mock synthesizer -----------------
 
