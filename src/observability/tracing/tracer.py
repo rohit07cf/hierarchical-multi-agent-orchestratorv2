@@ -20,8 +20,37 @@ import logging
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncIterator, Iterator
 
-from opentelemetry import trace
-from opentelemetry.trace import Span, SpanKind, Status, StatusCode
+# Fail-open: if opentelemetry-api is unavailable, fall back to no-op
+# tracing so the app still imports and runs. The OTel *API* is already
+# no-op until a provider is installed; this extra guard covers the case
+# where the package itself is missing (e.g. mid-deploy).
+try:
+    from opentelemetry import trace
+    from opentelemetry.trace import Span, SpanKind, Status, StatusCode
+
+    OTEL_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised only without the dep
+    OTEL_AVAILABLE = False
+
+    class SpanKind:  # type: ignore[no-redef]
+        INTERNAL = "internal"
+        CLIENT = "client"
+        SERVER = "server"
+
+    class _NoOpSpan:
+        def is_recording(self) -> bool:
+            return False
+
+        def set_attribute(self, *args, **kwargs) -> None:
+            pass
+
+        def record_exception(self, *args, **kwargs) -> None:
+            pass
+
+        def set_status(self, *args, **kwargs) -> None:
+            pass
+
+    Span = _NoOpSpan  # type: ignore[assignment,misc]
 
 from src.observability.config import ObservabilityConfig
 from src.observability.context import get_correlation
@@ -32,7 +61,7 @@ logger = logging.getLogger(__name__)
 _INSTRUMENTATION_NAME = "hmao.observability"
 
 
-def get_tracer() -> trace.Tracer:
+def get_tracer():
     return trace.get_tracer(_INSTRUMENTATION_NAME)
 
 
@@ -43,7 +72,7 @@ def setup_tracing(config: ObservabilityConfig) -> None:
     installed we log and leave the no-op tracer in place rather than
     crashing the app — observability must never take down the workload.
     """
-    if not config.enabled or config.trace_exporter == "none":
+    if not OTEL_AVAILABLE or not config.enabled or config.trace_exporter == "none":
         return
     # Don't clobber a provider another process component already set.
     if not isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider):
@@ -124,6 +153,9 @@ async def span(
     On an exception the span records it, sets ERROR status, and re-raises
     — so a failed run is visible in the trace *and* still propagates.
     """
+    if not OTEL_AVAILABLE:
+        yield Span()  # no-op span; caller code is unchanged
+        return
     tracer = get_tracer()
     with tracer.start_as_current_span(name, kind=kind) as sp:
         _apply_correlation(sp)
@@ -148,6 +180,9 @@ def sync_span(
     attributes: dict[str, Any] | None = None,
 ) -> Iterator[Span]:
     """Synchronous twin of ``span()`` for non-async code paths."""
+    if not OTEL_AVAILABLE:
+        yield Span()
+        return
     tracer = get_tracer()
     with tracer.start_as_current_span(name, kind=kind) as sp:
         _apply_correlation(sp)
@@ -165,6 +200,8 @@ def sync_span(
 
 def current_trace_ids() -> dict[str, str]:
     """Return ``trace_id``/``span_id`` of the active span as hex (for logs)."""
+    if not OTEL_AVAILABLE:
+        return {}
     ctx = trace.get_current_span().get_span_context()
     if not ctx.is_valid:
         return {}

@@ -22,7 +22,43 @@ and avoids duplicate-timeseries errors on reload).
 
 from __future__ import annotations
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+# Fail-open: if prometheus_client is not installed (e.g. a deploy where
+# deps haven't finished installing), fall back to no-op metric objects so
+# importing this module — and therefore the whole app — never crashes.
+# When the library is present (the normal case) behavior is unchanged.
+try:
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+
+    PROMETHEUS_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised only without the dep
+    PROMETHEUS_AVAILABLE = False
+
+    class _NoOpMetric:
+        """Mimics Counter/Gauge/Histogram with zero-cost no-op methods."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def labels(self, *args, **kwargs) -> "_NoOpMetric":
+            return self
+
+        def inc(self, *args, **kwargs) -> None:
+            pass
+
+        def dec(self, *args, **kwargs) -> None:
+            pass
+
+        def observe(self, *args, **kwargs) -> None:
+            pass
+
+        def set(self, *args, **kwargs) -> None:
+            pass
+
+    class CollectorRegistry:  # type: ignore[no-redef]
+        def collect(self):
+            return []
+
+    Counter = Gauge = Histogram = _NoOpMetric  # type: ignore[assignment,misc]
 
 # Bucket sets tuned to this workload.
 _FAST_BUCKETS = (0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5)

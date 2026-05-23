@@ -521,6 +521,14 @@ LLM cost. Three signals answer "is it up, is it fast, what does it cost?"
   no-op tracer until a provider is installed; metrics increment cheaply
   but aren't scraped. Gated by `OBS_ENABLED`. Tests prove the offline
   path is unchanged (39/39 pass).
+- **"What if the observability libs aren't installed?"** Every core dep
+  is import-guarded, so the package degrades to no-op telemetry and the
+  app still imports and runs. This matters on platforms (e.g. Streamlit
+  Community Cloud) that run the app once *before* installing newly-added
+  requirements — without the guards, that pre-install window throws
+  import tracebacks; with them, the app starts clean and lights up
+  telemetry once the deps land. Verified by blocking all four libs and
+  running a full orchestration.
 - **"What's special about LLM/RAG observability?"** Cost is a
   first-class metric (per model/operation, real usage preferred). RAG
   needs *quality* signals because a retrieval can succeed and still be

@@ -22,11 +22,10 @@ import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from opentelemetry.trace import SpanKind
-
 from src.observability.context import agent_scope
 from src.observability.metrics import registry as M
 from src.observability.metrics.cost import estimate_cost_usd, estimate_tokens
+from src.observability.tracing import SpanKind  # re-exported; no-op-safe
 from src.observability.tracing import attributes as A
 from src.observability.tracing import span
 

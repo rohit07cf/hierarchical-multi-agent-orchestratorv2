@@ -2,6 +2,8 @@
 
 from src.observability.tracing import attributes
 from src.observability.tracing.tracer import (
+    OTEL_AVAILABLE,
+    SpanKind,
     current_trace_ids,
     get_tracer,
     setup_tracing,
@@ -11,6 +13,8 @@ from src.observability.tracing.tracer import (
 
 __all__ = [
     "attributes",
+    "OTEL_AVAILABLE",
+    "SpanKind",
     "current_trace_ids",
     "get_tracer",
     "setup_tracing",

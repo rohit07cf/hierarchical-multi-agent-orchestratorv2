@@ -38,6 +38,7 @@ from src.models.state_models import (
 )
 from src.observability.context import correlation_scope
 from src.observability.metrics import registry as M
+from src.observability.tracing import SpanKind
 from src.observability.tracing import attributes as A
 from src.observability.tracing import span
 from src.orchestrator.execution_engine import ExecutionEngine, PreSubtaskHook
@@ -260,8 +261,6 @@ class RootSupervisorAgent:
         lives in ``_run_orchestration`` so every agent/tool/LLM span nests
         under this one and shares the same trace.
         """
-        from opentelemetry.trace import SpanKind
-
         state = OrchestratorState(user_query=user_query, status="planning")
         self.state = state
 

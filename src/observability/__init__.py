@@ -15,7 +15,11 @@ Design philosophy
 - **Standards only.** OpenTelemetry (traces) + Prometheus (metrics) +
   structlog (logs). No proprietary agent, no vendor lock-in — point the
   OTLP exporter at Tempo/Jaeger/Grafana Cloud via the collector.
-- **Fail-open.** Nothing here may crash the workload. Exporter missing,
+- **Fail-open.** Nothing here may crash the workload. Every core
+  dependency (structlog, opentelemetry, prometheus_client, psutil) is
+  import-guarded: if a library is absent — e.g. mid-deploy before pip/uv
+  finishes installing newly-added requirements — the package degrades to
+  no-op telemetry and the app still imports and runs. Exporter missing,
   port in use, SDK absent → log and continue.
 """
 

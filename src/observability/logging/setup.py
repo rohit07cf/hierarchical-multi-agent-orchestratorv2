@@ -22,14 +22,23 @@ Design notes:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
-
-import structlog
 
 from src.observability.config import ObservabilityConfig
 from src.observability.context import get_correlation
 from src.observability.tracing import current_trace_ids
+
+# Fail-open: if structlog is missing, fall back to stdlib logging with a
+# JSON formatter that still injects correlation + trace IDs. The app must
+# import and run regardless of whether the logging dep is installed.
+try:
+    import structlog
+
+    STRUCTLOG_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised only without the dep
+    STRUCTLOG_AVAILABLE = False
 
 
 def _add_correlation(_logger: Any, _method: str, event: dict) -> dict:
@@ -44,9 +53,46 @@ def _add_trace_context(_logger: Any, _method: str, event: dict) -> dict:
     return event
 
 
+class _StdlibJsonFormatter(logging.Formatter):
+    """Fallback JSON formatter used when structlog is unavailable.
+
+    Emits the same core schema (timestamp, level, event, correlation +
+    trace IDs) so downstream log processing is unaffected by the absence
+    of structlog.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, Any] = {
+            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "event": record.getMessage(),
+        }
+        payload.update(get_correlation().as_log_fields())
+        payload.update(current_trace_ids())
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload)
+
+
 def setup_logging(config: ObservabilityConfig) -> None:
     """Configure structlog + route stdlib logging through it. Idempotent."""
     level = getattr(logging, config.log_level.upper(), logging.INFO)
+
+    if not STRUCTLOG_AVAILABLE:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            _StdlibJsonFormatter() if config.log_json else logging.Formatter(
+                "%(asctime)s | %(levelname)-8s | %(name)-30s | %(message)s"
+            )
+        )
+        root = logging.getLogger()
+        root.handlers.clear()
+        root.addHandler(handler)
+        root.setLevel(level)
+        for noisy in ("httpx", "httpcore", "openai", "urllib3", "asyncio"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+        return
 
     shared_processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
@@ -92,6 +138,8 @@ def setup_logging(config: ObservabilityConfig) -> None:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
-def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
-    """Return a bound structlog logger (the app's preferred entry point)."""
+def get_logger(name: str | None = None):
+    """Return a bound structlog logger, or a stdlib logger as fallback."""
+    if not STRUCTLOG_AVAILABLE:
+        return logging.getLogger(name or "hmao")
     return structlog.get_logger(name)
