@@ -67,4 +67,11 @@ class SimpleRetriever:
             scored.append(RetrievedDoc(name=name, text=self._documents[name], score=score))
 
         scored.sort(key=lambda d: d.score, reverse=True)
-        return scored[:top_k]
+        top = scored[:top_k]
+        # Drop zero-overlap docs when at least one relevant doc exists —
+        # padding the context with irrelevant documents only adds noise and
+        # trips the "empty/irrelevant retrieval" quality signal. When *no*
+        # doc overlaps the query, keep the top-k so the chain still has
+        # something to summarize.
+        relevant = [d for d in top if d.score > 0.0]
+        return relevant or top

@@ -4,8 +4,18 @@ from __future__ import annotations
 
 import pytest
 
+from src.models.responses import AgentResponse
 from src.models.state_models import ExecutionStepKind
 from src.orchestrator.supervisor import RootSupervisorAgent
+
+
+@pytest.mark.asyncio
+async def test_aggregate_single_response_returns_verbatim() -> None:
+    """Fix A: one manager response is returned as-is — no aggregator LLM call."""
+    supervisor = RootSupervisorAgent()
+    only = AgentResponse(agent_name="ResearchManagerAgent", content="THE ANSWER")
+    result = await supervisor._aggregate("q", [only])
+    assert result == "THE ANSWER"
 
 
 @pytest.mark.asyncio

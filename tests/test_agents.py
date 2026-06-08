@@ -11,7 +11,7 @@ from src.agents.research_manager import ResearchManagerAgent
 from src.agents.review_agent import ReviewAgent
 from src.agents.summarizer_agent import SummarizerAgent
 from src.models.requests import AgentRequest
-from src.models.trace import LLMMode
+from src.models.trace import AgentReasoning, LLMMode, ToolDecision
 from src.tools.code_review_tool import review_code
 from src.tools.security_review_tool import scan_security
 from src.tools.simple_retriever import SimpleRetriever
@@ -64,6 +64,86 @@ def test_simple_retriever_returns_top_k_sorted() -> None:
     assert len(docs) == 2
     assert docs[0].score >= docs[1].score
     assert {d.name for d in docs} == {"a.md", "c.md"}
+
+
+def test_simple_retriever_drops_zero_overlap_docs_when_relevant_exists() -> None:
+    """Irrelevant (score-0) docs must not pad the result when a match exists."""
+    retriever = SimpleRetriever({
+        "relevant.md": "agent orchestration patterns",
+        "irrelevant.md": "completely unrelated content about cats",
+    })
+    docs = retriever.retrieve("agent orchestration", top_k=5)
+    assert {d.name for d in docs} == {"relevant.md"}
+    assert all(d.score > 0.0 for d in docs)
+
+
+def test_simple_retriever_keeps_top_k_when_nothing_overlaps() -> None:
+    """All-zero overlap → keep the top-k fallback so the chain has input."""
+    retriever = SimpleRetriever({
+        "x.md": "content about cats",
+        "y.md": "content about dogs",
+    })
+    docs = retriever.retrieve("quantum chromodynamics", top_k=2)
+    assert len(docs) == 2  # fallback: nothing matched, return top-k anyway
+
+
+class _SpyLLM:
+    """Minimal LLMClient stand-in that counts reason()/synthesize() calls."""
+
+    def __init__(self) -> None:
+        self.mode = LLMMode.REAL  # force the real path (mock would skip calls)
+        self.reason_calls = 0
+        self.synth_calls = 0
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    async def reason(self, *, agent_name, system_prompt, user_prompt,
+                     available_tools, mock_policy=None) -> AgentReasoning:
+        self.reason_calls += 1
+        if available_tools:
+            t = available_tools[0]
+            return AgentReasoning(
+                reasoning="spy",
+                selected_tools=[ToolDecision(
+                    tool_name=t.name, rationale="spy",
+                    arguments={"query": "agent orchestration"},
+                )],
+                skipped_tools=[],
+            )
+        return AgentReasoning(reasoning="spy", selected_tools=[], skipped_tools=[])
+
+    async def synthesize(self, *, agent_name, system_prompt, user_prompt,
+                         tool_results, mock_policy=None) -> str:
+        self.synth_calls += 1
+        return "SPY-SYNTH"
+
+
+@pytest.mark.asyncio
+async def test_rag_agent_does_not_call_llm_synthesize() -> None:
+    """Fix C: RAGAgent is retrieval-only — no LLM synthesis call."""
+    agent = RAGAgent()
+    spy = _SpyLLM()
+    agent.llm = spy  # type: ignore[assignment]
+    response = await agent.handle(AgentRequest(query="agent orchestration patterns"))
+    assert spy.synth_calls == 0, "RAGAgent must not invoke the LLM synthesizer"
+    assert spy.reason_calls == 1  # it still reasons to pick the retriever
+    # Content is the deterministic retrieval summary, not LLM prose.
+    assert "Retrieved" in response.content or "No knowledge-base" in response.content
+    assert response.data.get("documents") is not None
+
+
+@pytest.mark.asyncio
+async def test_toolless_agent_skips_llm_reason() -> None:
+    """Fix B: a tool-less agent (summarizer) skips the reason() LLM call."""
+    agent = SummarizerAgent()
+    spy = _SpyLLM()
+    agent.llm = spy  # type: ignore[assignment]
+    response = await agent.handle(AgentRequest(query="Summarize this text please."))
+    assert spy.reason_calls == 0, "tool-less agent must not invoke the LLM reasoner"
+    assert spy.synth_calls == 1  # it still synthesizes the summary
+    assert response.content == "SPY-SYNTH"
 
 
 # ----------------- Reasoning agent traces -----------------

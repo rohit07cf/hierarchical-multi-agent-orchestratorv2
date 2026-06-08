@@ -540,6 +540,12 @@ class RootSupervisorAgent:
         if not responses:
             return "No subtasks were executed."
 
+        # A single manager response IS the answer — re-running it through the
+        # aggregator LLM would only re-word one input, adding an Opus call's
+        # latency and cost for no gain. Return it verbatim.
+        if len(responses) == 1:
+            return responses[0].content
+
         async with span(
             A.SPAN_AGGREGATION,
             attributes={"hmao.aggregate.inputs": len(responses)},

@@ -74,12 +74,22 @@ class RAGAgent(ReasoningAgent):
 
         return policy
 
-    def _mock_synthesize(self, request, reasoning, invocations) -> str | None:
+    async def _synthesize(self, request, reasoning, invocations) -> str:
+        # RAGAgent is retrieval-only: its job is to return documents (which
+        # it forwards downstream via _extra_data), not to write prose. Skip
+        # the LLM synthesis entirely — the SummarizerAgent turns the
+        # retrieved docs into the narrative answer, so an LLM call here is
+        # pure waste (its output was never read by anything).
+        return self._retrieval_summary(invocations)
+
+    def _retrieval_summary(self, invocations: list[ToolInvocation]) -> str:
+        """Deterministic one-line description of what was retrieved."""
         docs = self._docs_from_invocations(invocations)
+        prefix = "[mock-llm] " if self.llm.mode.value == "mock" else ""
         if not docs:
-            return "[mock-llm] No knowledge-base documents matched the query."
+            return f"{prefix}No knowledge-base documents matched the query."
         names = ", ".join(d["name"] for d in docs)
-        return f"[mock-llm] Retrieved {len(docs)} document(s): {names}."
+        return f"{prefix}Retrieved {len(docs)} document(s): {names}."
 
     def _extra_data(self, invocations: list[ToolInvocation]) -> dict[str, Any]:
         return {"documents": self._docs_from_invocations(invocations)}

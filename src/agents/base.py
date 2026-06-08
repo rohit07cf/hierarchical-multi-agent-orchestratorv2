@@ -74,7 +74,15 @@ class ReasoningAgent(ABC):
         async with observe_agent(self.name) as obs:
             self._reset_run_state()
             self._log(f"Reasoning over request: {request.query[:80]!r}")
-            reasoning = await self._reason(request)
+            # Tool-less agents (e.g. the summarizer) have nothing to select,
+            # so skip the reason() LLM round-trip — it would just confirm
+            # "no tools". The trace reasoning comes from the deterministic
+            # policy instead, with no API call.
+            reasoning = (
+                await self._reason(request)
+                if self.tools
+                else self._toolless_reasoning(request)
+            )
             self._log(f"Reasoning: {reasoning.reasoning[:120]}")
 
             skipped = reasoning.skipped_tools or self._infer_skipped(reasoning)
@@ -151,6 +159,24 @@ class ReasoningAgent(ABC):
             user_prompt=self.user_prompt(request),
             available_tools=self.tools,
             mock_policy=self._mock_reason_policy(request),
+        )
+
+    def _toolless_reasoning(self, request: AgentRequest) -> AgentReasoning:
+        """Deterministic reasoning for an agent with no tools (no LLM call).
+
+        Reuses the agent's mock-reason policy for descriptive trace text
+        when available — it never selects tools for a tool-less agent —
+        otherwise falls back to a generic message.
+        """
+        policy = self._mock_reason_policy(request)
+        if policy is not None:
+            reasoning = policy()
+            reasoning.selected_tools = []
+            return reasoning
+        return AgentReasoning(
+            reasoning="No tools available; responding directly.",
+            selected_tools=[],
+            skipped_tools=[],
         )
 
     async def _execute_tools(
