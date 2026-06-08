@@ -91,12 +91,17 @@ async def run_orchestration(user_input: str, model: str, mode: str) -> Superviso
     hitl_manager: HITLManager = st.session_state["hitl_manager"]
 
     if mode == "manual":
-        return await supervisor.orchestrate_manual(user_input)
+        result = await supervisor.orchestrate_manual(user_input)
     elif mode == "hitl":
-        return await supervisor.orchestrate(
+        result = await supervisor.orchestrate(
             user_input, hitl_manager=hitl_manager, enable_hitl=True,
         )
-    return await supervisor.orchestrate(user_input)
+    else:
+        result = await supervisor.orchestrate(user_input)
+
+    # Surface this run's observability summary in the panel (cleared on pause).
+    st.session_state["last_request_metrics"] = supervisor.last_request_metrics
+    return result
 
 
 async def resume_hitl(state_id: str, model: str) -> SupervisorOutput | None:

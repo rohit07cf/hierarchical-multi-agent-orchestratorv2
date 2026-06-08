@@ -112,7 +112,9 @@ _CODING_INSTRUCTIONS = (
 # ----------------- Graph -----------------
 
 
-def build_supervisor(model: Model | None = None, *, hitl: bool = False) -> Agent:
+def build_supervisor(
+    model: Model | None = None, *, hitl: bool = False, hooks: object = None
+) -> Agent:
     """Build and return the root supervisor Agent.
 
     Args:
@@ -120,6 +122,8 @@ def build_supervisor(model: Model | None = None, *, hitl: bool = False) -> Agent
             `LitellmModel`). When `None`, agents have no bound model and a
             `RunConfig(model_provider=...)` must supply one at run time (tests).
         hitl: When True, the manager tools require approval (pause/resume).
+        hooks: Optional `RunHooks` threaded into every `as_tool` sub-run so the
+            observability/streaming hooks fire for managers and workers too.
     """
     rag = Agent(
         name="RAGAgent",
@@ -157,6 +161,7 @@ def build_supervisor(model: Model | None = None, *, hitl: bool = False) -> Agent
                 tool_name="call_rag_agent",
                 tool_description="Retrieve relevant knowledge-base documents.",
                 available_tools=RAG_TOOLS,
+                hooks=hooks,
                 output="retrieval",
             ),
             traced_as_tool(
@@ -164,6 +169,7 @@ def build_supervisor(model: Model | None = None, *, hitl: bool = False) -> Agent
                 tool_name="call_summarizer_agent",
                 tool_description="Summarize the retrieved documents or pasted text.",
                 available_tools=[],
+                hooks=hooks,
             ),
         ],
     )
@@ -177,12 +183,14 @@ def build_supervisor(model: Model | None = None, *, hitl: bool = False) -> Agent
                 tool_name="call_coding_agent",
                 tool_description="Generate code for the request.",
                 available_tools=CODING_TOOLS,
+                hooks=hooks,
             ),
             traced_as_tool(
                 review,
                 tool_name="call_review_agent",
                 tool_description="Review the generated code for quality and security.",
                 available_tools=REVIEW_TOOLS,
+                hooks=hooks,
             ),
         ],
     )
@@ -197,6 +205,7 @@ def build_supervisor(model: Model | None = None, *, hitl: bool = False) -> Agent
                 tool_name="ResearchManagerAgent",
                 tool_description="Coordinate retrieval + summarization.",
                 available_tools=RESEARCH_WORKER_TOOLS,
+                hooks=hooks,
                 needs_approval=hitl,
             ),
             traced_as_tool(
@@ -204,6 +213,7 @@ def build_supervisor(model: Model | None = None, *, hitl: bool = False) -> Agent
                 tool_name="BuildManagerAgent",
                 tool_description="Coordinate code generation + review.",
                 available_tools=BUILD_WORKER_TOOLS,
+                hooks=hooks,
                 needs_approval=hitl,
             ),
         ],

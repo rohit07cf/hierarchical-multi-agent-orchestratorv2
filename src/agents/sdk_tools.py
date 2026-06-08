@@ -305,6 +305,7 @@ def traced_as_tool(
     available_tools: list[str],
     output: str = "final",
     needs_approval: bool = False,
+    hooks: Any = None,
 ):
     """Expose ``agent`` as a tool that also records its trace into ``RunContext``.
 
@@ -324,4 +325,5 @@ def traced_as_tool(
         tool_description=tool_description,
         custom_output_extractor=extractor,
         needs_approval=needs_approval,
+        hooks=hooks,  # observe the sub-run (hooks don't auto-propagate)
     )

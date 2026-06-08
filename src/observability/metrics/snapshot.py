@@ -70,9 +70,15 @@ class MetricsSnapshot:
 
     @property
     def is_empty(self) -> bool:
-        return not (self.counters or self.histograms) or self.counter_total(
-            "agent_invocations_total"
-        ) == 0
+        # A run has happened iff at least one orchestration was counted. (Keying
+        # off agent_invocations_total alone hid the panel when agent-level
+        # metrics regressed even though orchestration/LLM data was present.)
+        if not (self.counters or self.histograms):
+            return True
+        return (
+            self.counter_total("orchestration_total") == 0
+            and self.counter_total("agent_invocations_total") == 0
+        )
 
 
 def collect_snapshot() -> MetricsSnapshot:

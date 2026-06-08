@@ -15,7 +15,9 @@ from src.observability.metrics.snapshot import MetricsSnapshot, collect_snapshot
 
 
 def render_observability_panel() -> None:
-    """Render orchestration / agent / tool / LLM / RAG metric panels."""
+    """Render the per-request summary + cumulative metric panels."""
+    _render_this_request(st.session_state.get("last_request_metrics"))
+
     snap = collect_snapshot()
 
     if snap.is_empty:
@@ -26,6 +28,7 @@ def render_observability_panel() -> None:
         )
         return
 
+    st.markdown("##### Cumulative (since app start)")
     _render_orchestration(snap)
     st.divider()
     _render_llm_cost(snap)
@@ -39,6 +42,35 @@ def render_observability_panel() -> None:
         "registry. The same series are scraped to Grafana when "
         "`OBS_ENABLED=true`."
     )
+
+
+def _render_this_request(m: dict | None) -> None:
+    """Per-request observability for the most recent run (production view)."""
+    if not m:
+        return
+    st.markdown("##### This request")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Latency", f"{m['latency_ms']:.0f} ms")
+    c2.metric("Est. cost", f"${m['cost_usd']:.4f}")
+    c3.metric("Tokens (in/out)", f"{m['input_tokens']:,}/{m['output_tokens']:,}")
+    c4.metric("Turns", m["turns"])
+    st.caption(
+        f"request_id `{m['request_id']}` · agents: " + ", ".join(m["agents"])
+    )
+    if m.get("per_agent"):
+        st.dataframe(
+            [
+                {
+                    "Agent": a["agent"],
+                    "Tools selected": ", ".join(a["selected_tools"]) or "—",
+                    "Tool calls": a["tool_calls"],
+                }
+                for a in m["per_agent"]
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+    st.divider()
 
 
 # --------------------------------------------------------------------------

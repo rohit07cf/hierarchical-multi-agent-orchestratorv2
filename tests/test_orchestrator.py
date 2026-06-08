@@ -64,6 +64,27 @@ async def test_bridge_build_query_routes_to_build_manager(monkeypatch) -> None:
     assert out.final_answer == "Code + review."
 
 
+async def test_observability_metrics_populate_per_request(monkeypatch) -> None:
+    """A run must record per-agent metrics (panel un-hides) + a request summary."""
+    monkeypatch.setattr(bridge, "make_model", lambda m: StubModel(_research_script()))
+    sup = bridge.SupervisorAgent()
+    await sup.orchestrate_manual(_RESEARCH)
+
+    from src.observability.metrics.snapshot import collect_snapshot
+
+    snap = collect_snapshot()
+    assert not snap.is_empty, "panel must un-hide after a run"
+    invs = snap.counter_by_label("agent_invocations_total", "agent")
+    assert {"RootSupervisorAgent", "ResearchManagerAgent", "RAGAgent"} <= set(invs)
+    # per-agent LLM token attribution (operation label == agent name)
+    assert snap.counter_by_label("llm_tokens_input_total", "operation")
+    assert snap.counter_by_label("routing_decisions_total", "next_manager")
+
+    m = sup.last_request_metrics
+    assert m and m["total_tokens"] > 0 and m["turns"] == 1 and m["request_id"]
+    assert "RAGAgent" in {a["agent"] for a in m["per_agent"]}
+
+
 async def test_hitl_pause_returns_none_and_captures_state(monkeypatch) -> None:
     """enable_hitl → manager tool needs approval → run pauses before executing."""
     monkeypatch.setattr(bridge, "make_model", lambda m: StubModel(_research_script()))
