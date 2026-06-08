@@ -34,7 +34,7 @@ from src.agents.sdk_tools import RunContext
 from src.observability.context import correlation_scope
 from src.observability.metrics import registry as M
 from src.observability.metrics.cost import estimate_cost_usd
-from src.observability.sdk_hooks import OrchestrationHooks
+from src.agents.sdk_hooks import OrchestrationHooks
 from src.observability.tracing import SpanKind, attributes as A, span
 
 logger = logging.getLogger(__name__)

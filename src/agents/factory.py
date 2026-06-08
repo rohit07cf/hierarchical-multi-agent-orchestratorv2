@@ -9,10 +9,21 @@ live in the supervisor Agent's `instructions`.
 
 from __future__ import annotations
 
+import logging
 import os
 
 from agents import Agent, Model, set_tracing_disabled
 from agents.extensions.models.litellm_model import LitellmModel
+
+# LiteLLM logs an INFO line per completion and prints debug suggestions; quiet
+# it so production logs aren't flooded (one line per agent turn otherwise).
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+try:  # pragma: no cover - cosmetic
+    import litellm
+
+    litellm.suppress_debug_info = True
+except Exception:
+    pass
 
 from src.agents.sdk_tools import (
     code_generation_tool,
