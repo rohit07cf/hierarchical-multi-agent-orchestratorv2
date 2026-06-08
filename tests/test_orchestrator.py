@@ -1,162 +1,100 @@
-"""End-to-end tests for the RootSupervisorAgent."""
+"""Bridge-level tests: SupervisorAgent (the UI contract) over the SDK graph.
+
+`make_model` is monkeypatched to a scripted `StubModel`, so the whole bridge
+(build graph → Runner.run → map → state mirror → HITL) runs without a network.
+"""
 
 from __future__ import annotations
 
-import pytest
+import agent_defs.supervisor as bridge
+from models.agent_state import HITLAction, HITLActionType, HITLCheckpointType
+from models.supervisor_output import SupervisorOutput
+from orchestration.hitl_manager import HITLManager
+from tests.stub_model import StubModel, func_call, message
 
-from src.models.responses import AgentResponse
-from src.models.state_models import ExecutionStepKind
-from src.orchestrator.supervisor import RootSupervisorAgent
-
-
-@pytest.mark.asyncio
-async def test_aggregate_single_response_returns_verbatim() -> None:
-    """Fix A: one manager response is returned as-is — no aggregator LLM call."""
-    supervisor = RootSupervisorAgent()
-    only = AgentResponse(agent_name="ResearchManagerAgent", content="THE ANSWER")
-    result = await supervisor._aggregate("q", [only])
-    assert result == "THE ANSWER"
+_RESEARCH = "Summarize the architecture of this project."
+_BUILD = "Build a FastAPI endpoint and review it."
 
 
-@pytest.mark.asyncio
-async def test_research_only_query_creates_single_task() -> None:
-    supervisor = RootSupervisorAgent()
-    state, response = await supervisor.orchestrate(
-        "Summarize the architecture of this project."
+def _research_script(final: str = "Final summary.") -> dict:
+    return {
+        "supervisor": [func_call("ResearchManagerAgent", input=_RESEARCH), message(final)],
+        "research": [
+            func_call("call_rag_agent", input="architecture"),
+            func_call("call_summarizer_agent", input="summarize"),
+            message("Research summary."),
+        ],
+        "rag": [func_call("simple_retriever", query="architecture", top_k=2)],
+        "summarizer": [message("This project uses a 3-layer hierarchical pattern.")],
+    }
+
+
+def _build_script() -> dict:
+    return {
+        "supervisor": [func_call("BuildManagerAgent", input=_BUILD), message("Code + review.")],
+        "build": [
+            func_call("call_coding_agent", input="fastapi"),
+            func_call("call_review_agent", input="review"),
+            message("Build summary."),
+        ],
+        "coding": [
+            func_call("template_loader", template_name="fastapi_upload_endpoint"),
+            message("Here is the endpoint."),
+        ],
+        "review": [func_call("code_review_tool", code="def x(): pass"), message("Reviewed.")],
+    }
+
+
+async def test_bridge_research_query(monkeypatch) -> None:
+    monkeypatch.setattr(bridge, "make_model", lambda m: StubModel(_research_script()))
+    sup = bridge.SupervisorAgent()
+    out = await sup.orchestrate_manual(_RESEARCH)
+    assert isinstance(out, SupervisorOutput)
+    assert out.final_answer == "Final summary."
+    assert [s.agent_name for s in out.subtasks] == ["ResearchManagerAgent"]
+    # the State Inspector mirror is populated
+    assert sup.state.intermediate_steps
+
+
+async def test_bridge_build_query_routes_to_build_manager(monkeypatch) -> None:
+    monkeypatch.setattr(bridge, "make_model", lambda m: StubModel(_build_script()))
+    sup = bridge.SupervisorAgent()
+    out = await sup.orchestrate_manual(_BUILD)
+    assert [s.agent_name for s in out.subtasks] == ["BuildManagerAgent"]
+    assert out.final_answer == "Code + review."
+
+
+async def test_hitl_pause_returns_none_and_captures_state(monkeypatch) -> None:
+    """enable_hitl → manager tool needs approval → run pauses before executing."""
+    monkeypatch.setattr(bridge, "make_model", lambda m: StubModel(_research_script()))
+    sup = bridge.SupervisorAgent()
+    hitl = HITLManager(persistence_dir=None)
+
+    out = await sup.orchestrate(_RESEARCH, hitl_manager=hitl, enable_hitl=True)
+    assert out is None, "HITL run should pause and return None"
+
+    paused = hitl.get_all_paused()
+    assert len(paused) == 1
+    state = paused[0]
+    assert state.checkpoint_type == HITLCheckpointType.TOOL_EXECUTION
+    assert state.pending_data["pending_tool"]["agent_name"] == "ResearchManagerAgent"
+    assert "_run_state" in state.pending_data  # serialized SDK RunState
+
+
+async def test_hitl_resume_after_approval(monkeypatch) -> None:
+    """Approving the paused manager resumes the run to a final answer."""
+    stub = StubModel(_research_script("Resumed final answer."))
+    monkeypatch.setattr(bridge, "make_model", lambda m: stub)  # persistent across resume
+    sup = bridge.SupervisorAgent()
+    hitl = HITLManager(persistence_dir=None)
+
+    assert await sup.orchestrate(_RESEARCH, hitl_manager=hitl, enable_hitl=True) is None
+    state_id = hitl.get_all_paused()[0].state_id
+
+    hitl.apply_action(
+        state_id, HITLAction(action=HITLActionType.APPROVE, reason="approved")
     )
-    assert state.status == "completed"
-    assert state.plan is not None
-    assert [t.agent_name for t in state.plan.tasks] == ["ResearchManagerAgent"]
-    assert response.content
-
-
-@pytest.mark.asyncio
-async def test_build_only_query_creates_single_task() -> None:
-    supervisor = RootSupervisorAgent()
-    state, response = await supervisor.orchestrate(
-        "Build a FastAPI endpoint for uploading documents."
-    )
-    assert state.status == "completed"
-    assert state.plan is not None
-    assert [t.agent_name for t in state.plan.tasks] == ["BuildManagerAgent"]
-    assert "fastapi" in response.content.lower()
-
-
-@pytest.mark.asyncio
-async def test_combined_query_runs_both_managers_in_order() -> None:
-    supervisor = RootSupervisorAgent()
-    state, _ = await supervisor.orchestrate(
-        "Search the knowledge base and generate implementation guidance."
-    )
-    assert state.plan is not None
-    assert [t.agent_name for t in state.plan.tasks] == [
-        "ResearchManagerAgent",
-        "BuildManagerAgent",
-    ]
-    assert all(t.is_success for t in state.plan.tasks)
-
-
-@pytest.mark.asyncio
-async def test_execution_timeline_records_expected_step_kinds() -> None:
-    supervisor = RootSupervisorAgent()
-    state, _ = await supervisor.orchestrate("Build a FastAPI endpoint.")
-    kinds = [s.kind for s in state.steps]
-    assert ExecutionStepKind.TASK_DECOMPOSITION in kinds
-    assert ExecutionStepKind.SUBTASK_STARTED in kinds
-    assert ExecutionStepKind.SUBTASK_COMPLETE in kinds
-    assert ExecutionStepKind.ORCHESTRATION_COMPLETE in kinds
-    # Steps should be in chronological order.
-    assert [s.step_number for s in state.steps] == list(range(1, len(state.steps) + 1))
-
-
-@pytest.mark.asyncio
-async def test_subtask_complete_steps_carry_agent_trace() -> None:
-    """Every manager invocation must surface its reasoning trace on the timeline."""
-    supervisor = RootSupervisorAgent()
-    state, _ = await supervisor.orchestrate("Build a FastAPI endpoint.")
-    completed_steps = [
-        s for s in state.steps if s.kind == ExecutionStepKind.SUBTASK_COMPLETE
-    ]
-    assert completed_steps, "expected at least one subtask_complete step"
-    for step in completed_steps:
-        trace = step.payload.get("trace")
-        assert trace is not None, (
-            f"subtask_complete for {step.agent_name} missing reasoning trace"
-        )
-        assert trace["agent_name"] == step.agent_name
-        # Manager trace should expose nested worker traces too.
-        # (BuildManagerAgent → CodingAgent / ReviewAgent)
-        worker_traces = step.payload.get("trace", {}).get("tool_invocations", [])
-        assert isinstance(worker_traces, list)
-
-
-@pytest.mark.asyncio
-async def test_philosophical_input_runs_summarizer_only_end_to_end() -> None:
-    """The 'meaning of life' query must not invoke BuildManager OR RAGAgent."""
-    supervisor = RootSupervisorAgent()
-    state, _ = await supervisor.orchestrate(
-        "The meaning of life is to live, to understand, and to create "
-        "something meaningful to share with others."
-    )
-    assert state.plan is not None
-    manager_names = [t.agent_name for t in state.plan.tasks]
-    assert manager_names == ["ResearchManagerAgent"]
-
-    research_task = state.plan.tasks[0]
-    research_trace = research_task.result.get("trace", {})
-    assert "call_summarizer_agent" in research_trace["selected_tools"]
-    assert "call_rag_agent" not in research_trace["selected_tools"], (
-        "RAGAgent must not be invoked for pasted philosophical text"
-    )
-
-
-@pytest.mark.asyncio
-async def test_pre_subtask_hook_can_pause_execution() -> None:
-    supervisor = RootSupervisorAgent()
-    call_count = {"n": 0}
-
-    async def block_first_subtask(idx, task, state) -> bool:
-        call_count["n"] += 1
-        return False  # never proceed — emulates a HITL pause
-
-    state, response = await supervisor.orchestrate(
-        "Build a FastAPI endpoint.", pre_subtask=block_first_subtask
-    )
-    assert call_count["n"] == 1
-    assert state.status == "paused"
-    assert response.content == "Execution paused for review."
-
-
-@pytest.mark.asyncio
-async def test_llm_repeating_a_manager_does_not_spin_to_max_turns() -> None:
-    """A manager runs at most once even if the LLM keeps re-picking it.
-
-    Regression for the observed run where gpt-4.1-nano repeatedly chose
-    ResearchManagerAgent, producing 6 near-identical subtasks until the
-    MAX_TURNS cap. The structural guard in `_decide_next_manager` must
-    discard any repeat selection and finish instead.
-    """
-    from src.models.trace import LLMMode
-
-    supervisor = RootSupervisorAgent()
-    # Force the LLM path on, then make the "LLM" misbehave exactly as the
-    # small model did: always ask for the same manager again.
-    supervisor.llm.mode = LLMMode.REAL
-    decide_calls = {"n": 0}
-
-    async def always_research(user_query, prior):
-        decide_calls["n"] += 1
-        return "ResearchManagerAgent", "always research (buggy)"
-
-    supervisor._llm_decide_next = always_research  # type: ignore[method-assign]
-
-    state, response = await supervisor.orchestrate(
-        "Summarize the architecture of this project."
-    )
-
-    assert state.status == "completed"
-    assert state.plan is not None
-    # ResearchManagerAgent must appear exactly once — not MAX_TURNS times.
-    agent_names = [t.agent_name for t in state.plan.tasks]
-    assert agent_names == ["ResearchManagerAgent"], agent_names
-    assert response.content
+    out = await sup.resume_orchestration(hitl, state_id)
+    assert isinstance(out, SupervisorOutput)
+    assert out.final_answer == "Resumed final answer."
+    assert [s.agent_name for s in out.subtasks] == ["ResearchManagerAgent"]

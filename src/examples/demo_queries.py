@@ -2,16 +2,11 @@
 
 Run with::
 
-    python -m src.examples.demo_queries
+    ANTHROPIC_API_KEY=... python -m src.examples.demo_queries
 
-Prints, for each query:
-
-- the user query
-- the routing/plan reasoning
-- the execution plan
-- the orchestration trace (one line per ExecutionStep)
-- each agent's reasoning trace (selected/skipped tools + tool calls)
-- the final aggregated response
+Each query goes through the OpenAI Agents SDK graph (Supervisor → Managers →
+Workers) on Claude via LiteLLM. Prints the final answer plus, per subtask, the
+manager/worker reasoning traces.
 """
 
 from __future__ import annotations
@@ -24,9 +19,9 @@ from pathlib import Path
 # Allow running directly via `python src/examples/demo_queries.py`.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.models.state_models import OrchestratorState  # noqa: E402
+from agent_defs.supervisor import SupervisorAgent  # noqa: E402
+from models.supervisor_output import SupervisorOutput  # noqa: E402
 from src.observability import init_observability  # noqa: E402
-from src.orchestrator.supervisor import RootSupervisorAgent  # noqa: E402
 
 DEMO_QUERIES: list[str] = [
     "Summarize the architecture of this project.",
@@ -40,75 +35,41 @@ DEMO_QUERIES: list[str] = [
 ]
 
 
-def _print_trace(trace: dict | None, indent: str = "  ") -> None:
-    """Pretty-print a single agent's reasoning trace."""
-    if not trace:
-        return
-    print(
-        f"{indent}[{trace.get('agent_name')}] mode={trace.get('llm_mode')} "
-        f"selected={trace.get('selected_tools')} "
-        f"skipped={trace.get('skipped_tools')}"
-    )
-    print(f"{indent}  reasoning: {trace.get('reasoning', '')[:200]}")
-    for inv in trace.get("tool_invocations") or []:
-        status = "ok" if inv.get("success") else "ERR"
-        print(
-            f"{indent}  tool {inv.get('tool_name')} [{status}]: "
-            f"{inv.get('result_preview', '')[:120]}"
-        )
-
-
-def _print_state(state: OrchestratorState) -> None:
-    """Pretty-print the full orchestration trace from `state`."""
-    assert state.plan is not None
-    print(f"Reasoning: {state.plan.reasoning}")
-    print("Execution plan:")
-    for i, task in enumerate(state.plan.tasks, 1):
-        print(
-            f"  {i}. {task.agent_name} — {task.description[:80]} "
-            f"(tools: {', '.join(task.tools_needed) or 'auto'})"
-        )
-
-    print("Orchestration trace:")
-    for step in state.steps:
-        print(f"  [{step.agent_name}] {step.kind.value}: {step.message}")
-
-    print("Agent reasoning traces:")
-    for task in state.plan.tasks:
-        if not isinstance(task.result, dict):
-            continue
-        trace = task.result.get("trace")
-        _print_trace(trace, indent="  ")
-        # Nested worker traces (managers expose these in data.worker_traces).
-        for worker_trace in (task.result.get("data") or {}).get(
-            "worker_traces", []
-        ):
-            _print_trace(worker_trace, indent="    ")
+def _print_output(output: SupervisorOutput) -> None:
+    """Pretty-print the supervisor output + per-agent traces."""
+    assert output.decomposition is not None
+    print(f"Reasoning: {output.decomposition.reasoning}")
+    print("Subtasks:")
+    for sub in output.subtasks:
+        print(f"  [{sub.agent_name}] {sub.status.value}: {str(sub.result)[:80]}")
+        for call in sub.tool_calls:
+            trace = call.get("agent_trace", {})
+            print(
+                f"    - {trace.get('agent_name')} "
+                f"selected={trace.get('selected_tools')} "
+                f"skipped={trace.get('skipped_tools')}"
+            )
 
 
 async def run_demo() -> None:
     """Iterate through `DEMO_QUERIES` and print results."""
-    # Wire observability from the environment. With OBS_ENABLED unset this
-    # is a no-op beyond structured logging, so the demo runs unchanged.
     init_observability()
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        print(
-            "WARNING: ANTHROPIC_API_KEY is not set — agents run in mock mode. "
-            "Reasoning traces and tool outputs are real; synthesis is a "
-            "labelled placeholder.\n"
-        )
+        print("ERROR: ANTHROPIC_API_KEY is required (the app no longer has an "
+              "offline mock mode).")
+        return
 
-    supervisor = RootSupervisorAgent()
+    supervisor = SupervisorAgent()
     for i, query in enumerate(DEMO_QUERIES, 1):
         print("\n" + "=" * 72)
         print(f"Demo {i}: {query}")
         print("=" * 72)
 
-        state, response = await supervisor.orchestrate(query)
-        _print_state(state)
+        output = await supervisor.orchestrate_manual(query)
+        _print_output(output)
 
-        print("\nFinal response:")
-        print(response.content)
+        print("\nFinal answer:")
+        print(output.final_answer)
 
 
 if __name__ == "__main__":

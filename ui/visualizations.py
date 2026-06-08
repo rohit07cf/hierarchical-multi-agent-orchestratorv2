@@ -130,16 +130,19 @@ def render_reasoning_panel(output: SupervisorOutput) -> None:
 
 
 def render_llm_mode_banner() -> None:
-    """Show a banner indicating whether agents run in real or mock LLM mode."""
+    """Show whether the Claude/LiteLLM credentials are configured."""
     import os
 
     if os.environ.get("ANTHROPIC_API_KEY"):
-        st.success("LLM mode: **real** (ANTHROPIC_API_KEY set)")
+        st.success(
+            "Agents: **OpenAI Agents SDK → LiteLLM → Claude** "
+            "(ANTHROPIC_API_KEY set)"
+        )
     else:
-        st.warning(
-            "LLM mode: **mock** — agents emit reasoning traces and run "
-            "deterministic tools, but synthesis is a labelled placeholder. "
-            "Set `ANTHROPIC_API_KEY` for real natural-language reasoning."
+        st.error(
+            "**ANTHROPIC_API_KEY is not set.** This app routes every agent "
+            "through LiteLLM to Claude and has no offline mock mode — set "
+            "`ANTHROPIC_API_KEY` to run queries."
         )
 
 

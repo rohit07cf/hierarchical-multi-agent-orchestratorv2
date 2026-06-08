@@ -1,22 +1,26 @@
-"""Tests for individual reasoning agents and their underlying tools."""
+"""Tests for the deterministic tools and the SDK-native agent graph.
+
+Tool primitives are tested directly (pure functions, unchanged by the SDK
+migration). The agent graph is exercised end-to-end against a scripted
+``StubModel`` — the real ``@function_tool`` bodies run, so the shared-context
+hand-off (RAG→Summarizer, Coder→Reviewer) and trace capture are real; only the
+model's tool-selection/output is stubbed (no network).
+"""
 
 from __future__ import annotations
 
 import pytest
+from agents import Runner
 
-from src.agents.build_manager import BuildManagerAgent
-from src.agents.coding_agent import CodingAgent
-from src.agents.rag_agent import RAGAgent
-from src.agents.research_manager import ResearchManagerAgent
-from src.agents.review_agent import ReviewAgent
-from src.agents.summarizer_agent import SummarizerAgent
-from src.models.requests import AgentRequest
-from src.models.trace import AgentReasoning, LLMMode, ToolDecision
+from src.agents.factory import build_supervisor
+from src.agents.result_mapper import map_run_result
+from src.agents.sdk_tools import RunContext
 from src.tools.code_review_tool import review_code
 from src.tools.security_review_tool import scan_security
 from src.tools.simple_retriever import SimpleRetriever
 from src.tools.template_loader import load_template
 from src.tools.test_gap_tool import scan_test_gaps
+from tests.stub_model import StubModel, func_call, message
 
 
 # ----------------- Tool primitives (deterministic) -----------------
@@ -67,7 +71,6 @@ def test_simple_retriever_returns_top_k_sorted() -> None:
 
 
 def test_simple_retriever_drops_zero_overlap_docs_when_relevant_exists() -> None:
-    """Irrelevant (score-0) docs must not pad the result when a match exists."""
     retriever = SimpleRetriever({
         "relevant.md": "agent orchestration patterns",
         "irrelevant.md": "completely unrelated content about cats",
@@ -78,219 +81,103 @@ def test_simple_retriever_drops_zero_overlap_docs_when_relevant_exists() -> None
 
 
 def test_simple_retriever_keeps_top_k_when_nothing_overlaps() -> None:
-    """All-zero overlap → keep the top-k fallback so the chain has input."""
     retriever = SimpleRetriever({
         "x.md": "content about cats",
         "y.md": "content about dogs",
     })
     docs = retriever.retrieve("quantum chromodynamics", top_k=2)
-    assert len(docs) == 2  # fallback: nothing matched, return top-k anyway
+    assert len(docs) == 2
 
 
-class _SpyLLM:
-    """Minimal LLMClient stand-in that counts reason()/synthesize() calls."""
+# ----------------- SDK agent graph (StubModel) -----------------
 
-    def __init__(self) -> None:
-        self.mode = LLMMode.REAL  # force the real path (mock would skip calls)
-        self.reason_calls = 0
-        self.synth_calls = 0
 
-    @property
-    def enabled(self) -> bool:
-        return True
-
-    async def reason(self, *, agent_name, system_prompt, user_prompt,
-                     available_tools, mock_policy=None) -> AgentReasoning:
-        self.reason_calls += 1
-        if available_tools:
-            t = available_tools[0]
-            return AgentReasoning(
-                reasoning="spy",
-                selected_tools=[ToolDecision(
-                    tool_name=t.name, rationale="spy",
-                    arguments={"query": "agent orchestration"},
-                )],
-                skipped_tools=[],
-            )
-        return AgentReasoning(reasoning="spy", selected_tools=[], skipped_tools=[])
-
-    async def synthesize(self, *, agent_name, system_prompt, user_prompt,
-                         tool_results, mock_policy=None) -> str:
-        self.synth_calls += 1
-        return "SPY-SYNTH"
+async def _run(script: dict, query: str):
+    sup = build_supervisor(model=StubModel(script))
+    ctx = RunContext()
+    result = await Runner.run(sup, query, context=ctx)
+    return result, ctx, map_run_result(result, query, ctx)
 
 
 @pytest.mark.asyncio
-async def test_rag_agent_does_not_call_llm_synthesize() -> None:
-    """Fix C: RAGAgent is retrieval-only — no LLM synthesis call."""
-    agent = RAGAgent()
-    spy = _SpyLLM()
-    agent.llm = spy  # type: ignore[assignment]
-    response = await agent.handle(AgentRequest(query="agent orchestration patterns"))
-    assert spy.synth_calls == 0, "RAGAgent must not invoke the LLM synthesizer"
-    assert spy.reason_calls == 1  # it still reasons to pick the retriever
-    # Content is the deterministic retrieval summary, not LLM prose.
-    assert "Retrieved" in response.content or "No knowledge-base" in response.content
-    assert response.data.get("documents") is not None
-
-
-@pytest.mark.asyncio
-async def test_toolless_agent_skips_llm_reason() -> None:
-    """Fix B: a tool-less agent (summarizer) skips the reason() LLM call."""
-    agent = SummarizerAgent()
-    spy = _SpyLLM()
-    agent.llm = spy  # type: ignore[assignment]
-    response = await agent.handle(AgentRequest(query="Summarize this text please."))
-    assert spy.reason_calls == 0, "tool-less agent must not invoke the LLM reasoner"
-    assert spy.synth_calls == 1  # it still synthesizes the summary
-    assert response.content == "SPY-SYNTH"
-
-
-# ----------------- Reasoning agent traces -----------------
-
-
-@pytest.mark.asyncio
-async def test_rag_agent_emits_trace_with_retriever_selected() -> None:
-    agent = RAGAgent()
-    response = await agent.handle(
-        AgentRequest(query="agent orchestration patterns")
-    )
-    assert response.success
-    assert response.trace is not None
-    trace = response.trace
-    assert trace["agent_name"] == "RAGAgent"
-    assert trace["llm_mode"] == LLMMode.MOCK.value
-    assert "simple_retriever" in trace["selected_tools"]
-    assert "load_knowledge_base" in trace["skipped_tools"]
-    assert response.data.get("documents")
-
-
-@pytest.mark.asyncio
-async def test_summarizer_calls_no_tools_for_pasted_text() -> None:
-    """Pasted text → SummarizerAgent must pick zero tools (the LLM synthesizes)."""
-    agent = SummarizerAgent()
-    response = await agent.handle(
-        AgentRequest(
-            query="The meaning of life is to live and create meaning together.",
-            context={},  # no retrieved docs
-        )
-    )
-    trace = response.trace
-    assert trace is not None
-    assert trace["selected_tools"] == []
-    assert "[mock-llm]" in response.content
-
-
-@pytest.mark.asyncio
-async def test_coding_agent_picks_template_for_fastapi_request() -> None:
-    agent = CodingAgent()
-    response = await agent.handle(
-        AgentRequest(query="Build a FastAPI endpoint for uploading documents.")
-    )
-    trace = response.trace
-    assert trace is not None
-    assert "template_loader" in trace["selected_tools"]
-    assert response.data["language"] == "python"
-    assert "FastAPI" in response.data["code"]
-
-
-@pytest.mark.asyncio
-async def test_review_agent_invokes_all_three_review_tools() -> None:
-    agent = ReviewAgent()
-    response = await agent.handle(
-        AgentRequest(
-            query="Review this code",
-            context={"code": 'def f():\n    API_KEY = "abc-secret-1234"\n    return 1\n'},
-        )
-    )
-    trace = response.trace
-    assert trace is not None
-    assert set(trace["selected_tools"]) == {
-        "code_review_tool",
-        "security_review_tool",
-        "test_gap_tool",
+async def test_research_path_hands_off_docs_to_summarizer() -> None:
+    """RAG retrieves; the docs reach the summarizer via the shared RunContext."""
+    q = "Summarize the architecture of this project."
+    script = {
+        "supervisor": [func_call("ResearchManagerAgent", input=q), message("Final summary.")],
+        "research": [
+            func_call("call_rag_agent", input="architecture"),
+            func_call("call_summarizer_agent", input="summarize"),
+            message("Research summary."),
+        ],
+        "rag": [func_call("simple_retriever", query="architecture", top_k=2)],
+        "summarizer": [message("This project uses a 3-layer hierarchical pattern.")],
     }
-    review = response.data["review"]
-    assert any(
-        f["category"] == "security" for f in review["findings"]
-    ), f"Expected a security finding, got: {review['findings']}"
+    _, ctx, out = await _run(script, q)
+
+    assert ctx.documents, "RAG must populate ctx.documents (the hand-off)"
+    assert out.final_answer == "Final summary."
+    assert [s.agent_name for s in out.subtasks] == ["ResearchManagerAgent"]
+    nested = [tc["agent_trace"]["agent_name"] for tc in out.subtasks[0].tool_calls]
+    assert nested == ["ResearchManagerAgent", "RAGAgent", "SummarizerAgent"]
 
 
 @pytest.mark.asyncio
-async def test_review_agent_skips_tools_when_no_code() -> None:
-    agent = ReviewAgent()
-    response = await agent.handle(
-        AgentRequest(query="Review this code", context={"code": ""})
-    )
-    trace = response.trace
-    assert trace is not None
-    assert trace["selected_tools"] == []
-    assert set(trace["skipped_tools"]) == {
-        "code_review_tool",
-        "security_review_tool",
-        "test_gap_tool",
+async def test_rag_agent_selects_retriever_only_no_synthesis() -> None:
+    """RAG (stop_on_first_tool) selects the retriever and returns the docs, no prose."""
+    q = "Find architecture docs."
+    script = {
+        "supervisor": [func_call("ResearchManagerAgent", input=q), message("done")],
+        "research": [func_call("call_rag_agent", input="architecture"), message("ok")],
+        "rag": [func_call("simple_retriever", query="architecture", top_k=2)],
+        "summarizer": [message("n/a")],
     }
-
-
-# ----------------- Manager-level routing decisions -----------------
+    _, _, out = await _run(script, q)
+    rag_trace = next(
+        tc["agent_trace"] for tc in out.subtasks[0].tool_calls
+        if tc["agent_trace"]["agent_name"] == "RAGAgent"
+    )
+    assert rag_trace["selected_tools"] == ["simple_retriever"]
+    assert "load_knowledge_base" in rag_trace["skipped_tools"]
 
 
 @pytest.mark.asyncio
-async def test_research_manager_skips_rag_for_philosophical_text() -> None:
-    """The 'meaning of life' case from the spec: SummarizerAgent only."""
-    manager = ResearchManagerAgent()
-    response = await manager.handle(
-        AgentRequest(
-            query=(
-                "The meaning of life is to live, to understand, and to "
-                "create something meaningful to share with others."
-            )
-        )
-    )
-    trace = response.trace
-    assert trace is not None
-    assert "call_summarizer_agent" in trace["selected_tools"]
-    assert "call_rag_agent" not in trace["selected_tools"], (
-        "Philosophical pasted text must not trigger the RAG worker"
-    )
-
-
-@pytest.mark.asyncio
-async def test_research_manager_uses_rag_for_lookup_intent() -> None:
-    manager = ResearchManagerAgent()
-    response = await manager.handle(
-        AgentRequest(query="Search the knowledge base for agent orchestration patterns.")
-    )
-    trace = response.trace
-    assert trace is not None
-    assert set(trace["selected_tools"]) == {
-        "call_rag_agent",
-        "call_summarizer_agent",
+async def test_summarizer_selects_no_tools() -> None:
+    q = "Summarize: the cat sat on the mat."
+    script = {
+        "supervisor": [func_call("ResearchManagerAgent", input=q), message("done")],
+        "research": [func_call("call_summarizer_agent", input=q), message("ok")],
+        "summarizer": [message("A cat sat on a mat.")],
     }
+    _, _, out = await _run(script, q)
+    summ = next(
+        tc["agent_trace"] for tc in out.subtasks[0].tool_calls
+        if tc["agent_trace"]["agent_name"] == "SummarizerAgent"
+    )
+    assert summ["selected_tools"] == []
 
 
 @pytest.mark.asyncio
-async def test_build_manager_runs_review_as_default_quality_gate() -> None:
-    manager = BuildManagerAgent()
-    response = await manager.handle(
-        AgentRequest(query="Build a small FastAPI endpoint.")
-    )
-    trace = response.trace
-    assert trace is not None
-    assert set(trace["selected_tools"]) == {
-        "call_coding_agent",
-        "call_review_agent",
+async def test_build_path_hands_off_code_to_reviewer() -> None:
+    """Coding generates code; it reaches the reviewer via the shared RunContext."""
+    q = "Build a FastAPI upload endpoint and review it."
+    script = {
+        "supervisor": [func_call("BuildManagerAgent", input=q), message("Code + review.")],
+        "build": [
+            func_call("call_coding_agent", input="fastapi upload"),
+            func_call("call_review_agent", input="review the code"),
+            message("Build summary."),
+        ],
+        "coding": [
+            func_call("template_loader", template_name="fastapi_upload_endpoint"),
+            message("Here is the endpoint."),
+        ],
+        "review": [func_call("code_review_tool", code="def x(): pass"), message("Reviewed.")],
     }
+    _, ctx, out = await _run(script, q)
 
-
-@pytest.mark.asyncio
-async def test_build_manager_skips_review_when_user_opts_out() -> None:
-    manager = BuildManagerAgent()
-    response = await manager.handle(
-        AgentRequest(query="Build a small FastAPI endpoint, no review please.")
-    )
-    trace = response.trace
-    assert trace is not None
-    assert "call_coding_agent" in trace["selected_tools"]
-    assert "call_review_agent" not in trace["selected_tools"]
-    assert "call_review_agent" in trace["skipped_tools"]
+    assert ctx.generated_code, "CodingAgent must populate ctx.generated_code"
+    assert "FastAPI" in ctx.generated_code
+    assert [s.agent_name for s in out.subtasks] == ["BuildManagerAgent"]
+    nested = [tc["agent_trace"]["agent_name"] for tc in out.subtasks[0].tool_calls]
+    assert nested == ["BuildManagerAgent", "CodingAgent", "ReviewAgent"]

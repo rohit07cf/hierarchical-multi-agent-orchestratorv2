@@ -11,10 +11,10 @@ graphviz>=0.20.0
 # Environment management
 python-dotenv>=1.0.1
 
-# Optional: real LLM completions via Claude (only used when
-# ANTHROPIC_API_KEY is set). Needs a recent SDK for adaptive thinking on
-# Opus 4.8; upgrade with `pip install -U anthropic` if a call 400s.
-anthropic>=0.69.0
+# Agent framework: OpenAI Agents SDK with the LiteLLM extra. All agents call
+# Claude (Opus 4.8) in-process via LiteLLM (`anthropic/claude-opus-4-8`),
+# authenticated with ANTHROPIC_API_KEY. There is no offline mock mode.
+openai-agents[litellm]>=0.17
 
 # Observability — OpenTelemetry (traces) + Prometheus (metrics) +
 # structlog (structured logs). All open standards, no vendor SDKs.
