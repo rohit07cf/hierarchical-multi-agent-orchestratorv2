@@ -97,7 +97,13 @@ async def simple_retriever(
             context_chars=sum(len(d.text) for d in docs),
         )
     payload = [{"name": d.name, "score": d.score, "text": d.text} for d in docs]
-    ctx.context.documents = payload  # hand-off to the summarizer
+    # Hand-off to the summarizer. Keep the best docs across a multi-search RAG
+    # run: a later zero-overlap search must not clobber relevant docs an
+    # earlier search already found.
+    relevant = [d for d in payload if d["score"] > 0.0]
+    existing_relevant = any(d.get("score", 0.0) > 0.0 for d in ctx.context.documents)
+    if relevant or not existing_relevant:
+        ctx.context.documents = relevant or payload
     return {"count": len(payload), "documents": payload}
 
 
@@ -270,13 +276,20 @@ def trace_from_run(agent_name: str, available_tools: list[str], result: RunResul
 
 
 def _retrieval_line(result: RunResult) -> str:
-    """Terse output for the retrieval-only RAG agent (preserves no-prose optimization)."""
-    final = result.final_output
-    docs = final.get("documents", []) if isinstance(final, dict) else []
-    if not docs:
+    """Terse output for the RAG ``as_tool``, read from the documents the
+    retriever actually wrote to the shared context.
+
+    This is the source of truth — independent of whether the RAG agent stopped
+    after one tool or looped and produced a (possibly "no docs") prose message.
+    Reading ``final_output`` instead would mis-report retrieved docs as missing.
+    """
+    ctx = result.context_wrapper.context
+    docs = ctx.documents if isinstance(ctx, RunContext) else []
+    relevant = [d for d in docs if d.get("score", 0.0) > 0.0]
+    if not relevant:
         return "No knowledge-base documents matched the query."
-    names = ", ".join(d["name"] for d in docs)
-    return f"Retrieved {len(docs)} document(s): {names}."
+    names = ", ".join(d["name"] for d in relevant)
+    return f"Retrieved {len(relevant)} document(s): {names}."
 
 
 def _final_text(result: RunResult) -> str:

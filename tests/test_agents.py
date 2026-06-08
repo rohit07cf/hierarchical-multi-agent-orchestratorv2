@@ -12,9 +12,15 @@ from __future__ import annotations
 import pytest
 from agents import Runner
 
+from agents import Agent
 from src.agents.factory import build_supervisor
 from src.agents.result_mapper import map_run_result
-from src.agents.sdk_tools import RunContext
+from src.agents.sdk_tools import (
+    RunContext,
+    _retrieval_line,
+    load_knowledge_base_tool,
+    simple_retriever,
+)
 from src.tools.code_review_tool import review_code
 from src.tools.security_review_tool import scan_security
 from src.tools.simple_retriever import SimpleRetriever
@@ -155,6 +161,48 @@ async def test_summarizer_selects_no_tools() -> None:
         if tc["agent_trace"]["agent_name"] == "SummarizerAgent"
     )
     assert summ["selected_tools"] == []
+
+
+class _FakeWrap:
+    def __init__(self, ctx): self.context = ctx
+
+
+class _FakeResult:
+    """Minimal RunResult stand-in for unit-testing _retrieval_line."""
+    def __init__(self, ctx, final_output): self.context_wrapper = _FakeWrap(ctx); self.final_output = final_output
+
+
+def test_retrieval_line_reports_docs_even_when_agent_says_none() -> None:
+    """Regression: RAG looped and emitted a 'no docs' message, but the retriever
+    DID find docs. The as_tool output must reflect the retrieved docs, not the
+    agent's prose (the live bug where a real summary was never produced)."""
+    ctx = RunContext(documents=[{"name": "architecture_notes.md", "score": 0.5, "text": "x"}])
+    line = _retrieval_line(_FakeResult(ctx, "I couldn't find any relevant documentation."))
+    assert line == "Retrieved 1 document(s): architecture_notes.md."
+
+
+def test_retrieval_line_reports_none_when_only_zero_score_docs() -> None:
+    ctx = RunContext(documents=[{"name": "x.md", "score": 0.0, "text": "x"}])
+    line = _retrieval_line(_FakeResult(ctx, "anything"))
+    assert line == "No knowledge-base documents matched the query."
+
+
+@pytest.mark.asyncio
+async def test_retriever_keeps_relevant_docs_across_a_broader_search() -> None:
+    """A later zero-overlap search must not clobber relevant docs found earlier."""
+    rag = Agent(
+        name="RAGAgent",
+        model=StubModel({"rag": [
+            func_call("simple_retriever", query="agent orchestration patterns", top_k=2),
+            func_call("simple_retriever", query="zzz nothing matches here", top_k=2),
+            message("done"),
+        ]}),
+        tools=[simple_retriever, load_knowledge_base_tool],
+    )
+    ctx = RunContext()
+    await Runner.run(rag, "go", context=ctx)
+    assert ctx.documents, "relevant docs from the first search must survive"
+    assert all(d["score"] > 0.0 for d in ctx.documents)
 
 
 @pytest.mark.asyncio

@@ -262,9 +262,9 @@ def run_app() -> None:
 
     st.title("Hierarchical Multi-Agent Orchestrator")
     st.caption(
-        "LLM-powered reasoning agents (RootSupervisor → Managers → "
-        "Workers) with HITL support, per-agent reasoning traces, and a "
-        "deterministic offline mock when no API key is set."
+        "OpenAI Agents SDK agents (RootSupervisor → Managers → Workers) "
+        "powered by Claude via LiteLLM, with HITL support and per-agent "
+        "reasoning traces. Requires ANTHROPIC_API_KEY."
     )
     render_llm_mode_banner()
 

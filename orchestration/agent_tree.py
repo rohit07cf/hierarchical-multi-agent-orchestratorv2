@@ -201,24 +201,33 @@ class AgentTree:
         Returns:
             AgentTree shaped as RootSupervisorAgent → managers → workers.
         """
+        # Tool labels mirror the SDK graph in src/agents/factory.py: managers
+        # expose their workers via as_tool(); workers wrap deterministic tools.
         root = AgentNode(name="RootSupervisorAgent")
-        root.add_tool("router")
-        root.add_tool("execution_engine")
+        root.add_tool("ResearchManagerAgent")
+        root.add_tool("BuildManagerAgent")
 
         research = AgentNode(name="ResearchManagerAgent")
+        research.add_tool("call_rag_agent")
+        research.add_tool("call_summarizer_agent")
         rag = AgentNode(name="RAGAgent")
         rag.add_tool("simple_retriever")
         rag.add_tool("load_knowledge_base")
-        summarizer = AgentNode(name="SummarizerAgent")
-        summarizer.add_tool("llm_summarize")
+        summarizer = AgentNode(name="SummarizerAgent")  # no tools (LLM-only)
         research.add_child(rag)
         research.add_child(summarizer)
 
         build = AgentNode(name="BuildManagerAgent")
+        build.add_tool("call_coding_agent")
+        build.add_tool("call_review_agent")
         coding = AgentNode(name="CodingAgent")
-        coding.add_tool("llm_codegen")
+        coding.add_tool("code_generation_tool")
+        coding.add_tool("template_loader")
+        coding.add_tool("file_context_tool")
         review = AgentNode(name="ReviewAgent")
-        review.add_tool("review_code")
+        review.add_tool("code_review_tool")
+        review.add_tool("security_review_tool")
+        review.add_tool("test_gap_tool")
         build.add_child(coding)
         build.add_child(review)
 
