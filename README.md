@@ -238,6 +238,25 @@ orchestration trace, and final response for each demo query.
 pytest
 ```
 
+## Documentation
+
+A friendly **High-Level Design** document (with a Customer Support Assistant use case,
+the full production architecture, streaming/SSE, hooks, HITL, and long-running agents)
+lives in [`docs/`](docs/):
+
+- [`docs/HLD-Agentic-Customer-Support.pdf`](docs/HLD-Agentic-Customer-Support.pdf) — the rendered PDF
+- [`docs/hld.html`](docs/hld.html) — editable source
+- [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) — the observability stack
+
+Regenerate the PDF after editing `hld.html`:
+
+```bash
+make docs-deps   # one-time: pip install -r docs/requirements-docs.txt (WeasyPrint)
+make docs        # renders docs/hld.html -> docs/HLD-Agentic-Customer-Support.pdf
+```
+
+(Or directly: `python docs/build_pdf.py`. Run `make help` to list all targets.)
+
 ## Sample queries
 
 1. *Summarize the architecture of this project.*

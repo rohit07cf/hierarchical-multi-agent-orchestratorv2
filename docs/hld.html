@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HLD — Agentic Customer Support Assistant</title>
+<style>
+  @page {
+    size: A4;
+    margin: 18mm 16mm 20mm 16mm;
+    @bottom-center {
+      content: "High-Level Design · Agentic Customer Support Assistant";
+      font-size: 8pt; color: #9aa5b1;
+    }
+    @bottom-right { content: "Page " counter(page) " / " counter(pages); font-size: 8pt; color: #9aa5b1; }
+  }
+  @page :first { margin: 0; @bottom-center { content: ""; } @bottom-right { content: ""; } }
+
+  * { box-sizing: border-box; }
+  html { -weasy-hyphens: none; }
+  body {
+    font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    color: #243b53; font-size: 10.5pt; line-height: 1.62; margin: 0;
+  }
+  h1, h2, h3, h4 { color: #102a43; line-height: 1.25; font-weight: 700; }
+  h2 { font-size: 17pt; margin: 0 0 6px; padding-bottom: 6px; border-bottom: 3px solid #2dd4bf; }
+  h3 { font-size: 13pt; margin: 20px 0 4px; color: #0f766e; }
+  h4 { font-size: 11pt; margin: 14px 0 2px; color: #334e68; }
+  p { margin: 6px 0; }
+  ul, ol { margin: 6px 0 6px 0; padding-left: 20px; }
+  li { margin: 3px 0; }
+  b, strong { color: #102a43; }
+  code { font-family: "SF Mono","Consolas","Liberation Mono",monospace; font-size: 9pt;
+         background: #eef2f7; padding: 1px 5px; border-radius: 4px; color: #0b5563; }
+  a { color: #0f766e; text-decoration: none; }
+
+  .part { page-break-before: always; }
+  .section { margin-top: 18px; }
+
+  /* Cover */
+  .cover { height: 297mm; background: linear-gradient(150deg,#0f766e 0%,#155e75 55%,#1e3a8a 100%);
+           color: #fff; padding: 40mm 22mm; }
+  .cover .kicker { letter-spacing: 3px; text-transform: uppercase; font-size: 11pt; color: #99f6e4; margin-bottom: 14px; }
+  .cover h1 { color: #fff; font-size: 34pt; line-height: 1.12; margin: 0 0 16px; border: none; }
+  .cover .sub { font-size: 14pt; color: #cffafe; max-width: 150mm; line-height: 1.5; }
+  .cover .meta { margin-top: 34mm; font-size: 10.5pt; color: #a5f3fc; line-height: 1.9; }
+  .cover .pill { display: inline-block; background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.28);
+                 border-radius: 30px; padding: 4px 14px; margin: 4px 6px 4px 0; font-size: 9.5pt; color: #ecfeff; }
+
+  /* Callout boxes */
+  .box { border-radius: 8px; padding: 9px 13px 9px 13px; margin: 9px 0;
+         border-left: 4px solid; font-size: 10pt; }
+  .box .lab { display:block; font-weight: 700; font-size: 8.5pt; letter-spacing: .6px;
+              text-transform: uppercase; margin-bottom: 3px; }
+  .plain   { background: #eef4ff; border-color: #4f46e5; } .plain .lab { color:#4f46e5; }
+  .usecase { background: #ecfdf5; border-color: #0f766e; } .usecase .lab { color:#0f766e; }
+  .tech    { background: #f4f5f7; border-color: #64748b; } .tech .lab { color:#475569; }
+  .key     { background: #fffbeb; border-color: #d97706; } .key .lab { color:#b45309; }
+
+  /* Diagrams */
+  pre.diagram { background: #f8fafc; border: 1px solid #d9e2ec; border-radius: 8px;
+    padding: 11px 13px; font-family: "SF Mono","Consolas","Liberation Mono",monospace;
+    font-size: 7.6pt; line-height: 1.34; color: #334e68; white-space: pre; overflow: hidden; }
+
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 9.3pt; }
+  th { background: #0f766e; color: #fff; text-align: left; padding: 6px 9px; font-weight: 600; }
+  td { padding: 6px 9px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+  tr:nth-child(even) td { background: #f7fafc; }
+
+  .toc li { margin: 5px 0; }
+  .lead { font-size: 11.5pt; color: #334e68; }
+  .tag { display:inline-block; background:#e6fffa; color:#0f766e; border:1px solid #99f6e4;
+         border-radius:5px; padding:0 7px; font-size:8.5pt; font-weight:600; }
+  hr { border: none; border-top: 1px solid #e2e8f0; margin: 16px 0; }
+  .small { font-size: 9pt; color: #627d98; }
+</style>
+</head>
+<body>
+
+<!-- ===================== COVER ===================== -->
+<div class="cover">
+  <div class="kicker">High-Level Design Document</div>
+  <h1>Agentic Customer<br>Support Assistant</h1>
+  <div class="sub">A production architecture for long-running, multi-agent systems —
+  built on the OpenAI Agents SDK, Claude (via LiteLLM), durable workflows, streaming,
+  and human-in-the-loop approvals. Explained in plain language.</div>
+  <div class="meta">
+    <span class="pill">OpenAI Agents SDK</span>
+    <span class="pill">Claude / LiteLLM</span>
+    <span class="pill">Temporal (durable)</span>
+    <span class="pill">FastAPI + SSE</span>
+    <span class="pill">Redis Streams</span>
+    <span class="pill">Agentic Memory</span>
+    <span class="pill">HITL</span>
+    <br><br>
+    Use case: a support assistant that can work a single ticket for <b>days</b><br>
+    Audience: engineers &amp; architects · Reading level: friendly, low mental load
+  </div>
+</div>
+
+<!-- ===================== TOC ===================== -->
+<div class="part">
+<h2>Contents</h2>
+<ol class="toc">
+  <li><b>The big idea</b> — what we're building and why it's "agentic"</li>
+  <li><b>The use case</b> — a support ticket that takes 3 days</li>
+  <li><b>Architecture at a glance</b> — the one diagram</li>
+  <li><b>Mental model</b> — an agent is a loop; the system is a tree of agents</li>
+  <li><b>The Agent Graph</b> — how AgentTree &amp; AgentNode build it</li>
+  <li><b>Component deep-dives</b> — every box, in plain terms
+     <ul class="small">
+       <li>5.1 Clients &amp; API Gateway (FastAPI)</li>
+       <li>5.2 Streaming — StreamingResponse, SSE, and how agents use it</li>
+       <li>5.3 OpenAI Agents SDK runtime — the agent loop</li>
+       <li>5.4 Hooks &amp; the Redis streaming callback handler</li>
+       <li>5.5 Model gateway — LiteLLM → Claude</li>
+       <li>5.6 Tools / Actions — MCP &amp; sandboxed execution</li>
+       <li>5.7 Memory — the four kinds</li>
+       <li>5.8 Durable orchestration — Temporal &amp; long-running agents</li>
+       <li>5.9 Eventing — Redis Streams</li>
+       <li>5.10 Data stores &amp; Observability</li>
+     </ul>
+  </li>
+  <li><b>Human-in-the-loop (HITL)</b> — storage, resume, and effect on the graph</li>
+  <li><b>End-to-end walkthrough</b> — the 3-day ticket, step by step</li>
+  <li><b>Tech stack summary</b></li>
+  <li><b>Glossary</b></li>
+</ol>
+</div>
+
+<!-- ===================== 1. BIG IDEA ===================== -->
+<div class="part">
+<h2>1 · The big idea</h2>
+<p class="lead">We are building a <b>customer support assistant</b> that doesn't just
+answer one question and stop. It can <b>investigate, take actions, ask a human for
+approval, wait days for an outside event, and then finish the job</b> — all on its own,
+while keeping the customer updated live.</p>
+
+<div class="box plain"><span class="lab">In plain terms</span>
+A normal chatbot is like a vending machine: one question in, one answer out, done.
+An <b>agentic</b> system is like a capable employee: it has a goal, it decides what
+steps to take, it uses tools (look up an order, issue a refund), it knows when to ask
+a manager for sign-off, and it can pick up a task again tomorrow where it left off.</div>
+
+<h3>What makes it "agentic"</h3>
+<ul>
+  <li><b>It decides, step by step.</b> An LLM (Claude) chooses the next action each turn,
+  instead of following a fixed script.</li>
+  <li><b>It uses tools.</b> Searching policy docs, looking up an order, issuing a refund —
+  each is a tool the agent can call.</li>
+  <li><b>It is a team, not a soloist.</b> A <i>supervisor</i> delegates to <i>managers</i>,
+  who delegate to <i>workers</i>. Each is focused on one job.</li>
+  <li><b>It is durable.</b> If the server restarts, or it's waiting three days for a
+  shipping company, the work is <b>not lost</b>.</li>
+  <li><b>It keeps a human in charge of risky steps.</b> Refunds get approved by a person
+  before they happen.</li>
+</ul>
+</div>
+
+<!-- ===================== 2. USE CASE ===================== -->
+<div class="part">
+<h2>2 · The use case — a 3-day support ticket</h2>
+<p>We'll follow <b>one realistic ticket</b> through the whole document so every component
+has a concrete meaning.</p>
+
+<div class="box usecase"><span class="lab">The ticket</span>
+<b>Maria</b> writes in: <i>"My order #1234 never arrived, and I think I was charged twice.
+Please help."</i> She's a premium member who prefers email.</div>
+
+<h3>Why this needs an agentic system</h3>
+<p>Resolving this isn't one step — it's a small project:</p>
+<ol>
+  <li><b>Understand</b> — read the message, pull Maria's account &amp; order history,
+  check the refund and shipping policies.</li>
+  <li><b>Act</b> — open a "lost package" claim with the carrier, draft a refund for the
+  double charge, write a friendly reply.</li>
+  <li><b>Get approval</b> — a refund over $50 needs a <b>human agent's sign-off</b>
+  (this might take a few hours until someone is free).</li>
+  <li><b>Wait</b> — the carrier's "lost package" investigation can take <b>2–3 days</b>.
+  The assistant goes to sleep and wakes up when the carrier responds.</li>
+  <li><b>Finish</b> — once the carrier confirms the loss, reship or refund, email Maria,
+  and close the ticket.</li>
+</ol>
+
+<div class="box key"><span class="lab">The long-running part</span>
+Steps 3 and 4 mean a single ticket can stay "in progress" for <b>days</b>. The assistant
+must survive deploys, restarts, and long waits — without holding a server open or losing
+its place. This is the heart of the design.</div>
+</div>
+
+<!-- ===================== 3. ARCHITECTURE ===================== -->
+<div class="part">
+<h2>3 · Architecture at a glance</h2>
+<p>Everything in this document fits in one picture. Don't worry about the details yet —
+we'll explain each box in plain terms.</p>
+
+<pre class="diagram">
+  CUSTOMER  (web chat / email)
+      |  HTTPS  +  live updates via SSE (Server-Sent Events)
+      v
++-----------------------------------------------------------------+
+| API GATEWAY  (FastAPI)                                          |
+|  login & permissions . rate limits . opens the SSE stream       |
++-----------------------------------------------------------------+
+      |  "start ticket #1234"
+      v
++-----------------------------------------------------------------+
+| DURABLE ORCHESTRATION  (Temporal)                               |
+|  The whole job is a "workflow" that can run for days, survive    |
+|  restarts, sleep cheaply, and pause for human approval.          |
++-----------------------------------------------------------------+
+      |  runs the agent team inside reliable "activities"
+      v
++-----------------------------------------------------------------+
+| AGENT TEAM  (OpenAI Agents SDK)            HOOKS  ---> Redis     |
+|                                            (watch each step)    |
+|   SupervisorAgent                                  |            |
+|     |-- KnowledgeManager -- OrderLookup, PolicySearch           |
+|     |-- ResolutionManager - RefundTool(needs approval), Emailer |
++-----------------------------------------------------------------+
+      |  every model call          |  every tool call
+      v                            v
++------------------+      +---------------------------------------+
+| MODEL GATEWAY    |      | TOOLS / ACTIONS                       |
+| LiteLLM -> Claude|      | order DB . carrier API . refund API . |
+| cache . fallback |      | policy search (MCP / sandbox)         |
++------------------+      +---------------------------------------+
+      |
+      v
++-----------------------------------------------------------------+
+| MEMORY & DATA                                                   |
+|  Working (Redis) . Episodic (past tickets) . Semantic (Maria is |
+|  premium, prefers email) . Procedural (the refund SOP)          |
+|  Stores: Postgres . Redis . Vector DB . Object store            |
++-----------------------------------------------------------------+
+
+   EVENTING: Redis Streams  -- live step events --> SSE --> customer
+   CROSS-CUTTING: Observability . Guardrails . Cost limits . Security
+</pre>
+
+<div class="box plain"><span class="lab">How to read it top-to-bottom</span>
+The customer talks to a <b>front door</b> (FastAPI). The front door starts a <b>durable
+job</b> (Temporal). The job runs the <b>agent team</b> (OpenAI Agents SDK). The agents
+call <b>Claude</b> to think and <b>tools</b> to act. Everything they learn is saved in
+<b>memory</b>. As they work, <b>hooks</b> push live updates through <b>Redis</b> back to
+the customer's screen.</div>
+</div>
+
+<!-- ===================== 4. MENTAL MODEL ===================== -->
+<div class="part">
+<h2>4 · Mental model — agents are loops, the system is a tree</h2>
+
+<h3>An agent is a loop around an LLM</h3>
+<p>An "agent" is not magic. It is a <b>loop</b> wrapped around one LLM. Each lap is called
+a <b>turn</b>. On every turn the LLM gets the whole story so far and does one of two things:</p>
+<ul>
+  <li><b>"Use a tool first"</b> → it names a tool (e.g. <i>look up order #1234</i>). The
+  system runs the tool, pastes the result back in, and loops again.</li>
+  <li><b>"I'm done"</b> → it writes a final answer. The loop ends.</li>
+</ul>
+
+<pre class="diagram">
+                +-------------------- ONE AGENT --------------------+
+  customer  --> | ask the LLM: "here's everything so far, what now?"|
+  message       |          |                                        |
+                |   +------+------+                                  |
+                |   v             v                                  |
+                | "use a tool"  "I'm done"                           |
+                |   |             |                                  |
+                |   v             v                                  |
+                | run tool,    final answer --------------------> OUT|
+                | paste result    ^                                  |
+                |   |             | (loop until done)                |
+                |   +-------------+                                  |
+                +---------------------------------------------------+
+</pre>
+
+<div class="box key"><span class="lab">What stops the loop running forever — "max turns"</span>
+Because the LLM decides when to stop, a confused model could loop forever (search →
+"let me search again" → search → ...). <b>max_turns</b> is a hard ceiling — a lap counter.
+Before each new turn the loop checks "have I hit the limit?" If yes, it <b>stops and raises
+an error</b> rather than looping again. It's the seatbelt: no matter how confused the model
+gets, the loop cannot run more than N times.</div>
+
+<h3>The system is a tree of agents</h3>
+<p>A tool can itself be <b>another whole agent</b>. So a manager's "tools" are its workers,
+and the supervisor's "tools" are its managers. Our support assistant:</p>
+
+<pre class="diagram">
+  SupervisorAgent              "understand the ticket, then resolve it"
+    |
+    |-- KnowledgeManager       "find out what happened"
+    |     |-- OrderLookup      tool: read the order database
+    |     |-- PolicySearch     tool: search refund / shipping policy docs
+    |
+    |-- ResolutionManager      "fix it"
+          |-- RefundTool       tool: issue refund   (NEEDS HUMAN APPROVAL)
+          |-- CarrierClaim     tool: open lost-package claim with carrier
+          |-- Emailer          tool: draft & send the reply to Maria
+</pre>
+<p class="small">In the current codebase the two managers are <code>ResearchManagerAgent</code>
+and <code>BuildManagerAgent</code>; for support we simply rename and re-tool them. The
+shape is identical.</p>
+</div>
+
+<!-- ===================== 5. AGENT GRAPH ===================== -->
+<div class="part">
+<h2>5 · The Agent Graph — how <span class="tag">AgentTree</span> &amp; <span class="tag">AgentNode</span> build it</h2>
+
+<p>There are <b>two</b> related things, and it helps to keep them separate:</p>
+
+<table>
+<tr><th>Thing</th><th>What it is</th><th>Job</th></tr>
+<tr><td><b>The executable graph</b></td>
+    <td>Real <code>Agent</code> objects from the OpenAI Agents SDK, wired together with
+    <code>agent.as_tool(...)</code>.</td>
+    <td>Actually <i>runs</i> the work.</td></tr>
+<tr><td><b>The AgentTree</b></td>
+    <td>A lightweight description of the same hierarchy — names, tools, parent/child links.</td>
+    <td><i>Describes</i> the work: drives the sidebar diagram and lets the UI look up any
+    node by path.</td></tr>
+</table>
+
+<h3>AgentNode — one box in the tree</h3>
+<p>An <b>AgentNode</b> is a single agent's entry in the map. It holds just three things:</p>
+<ul>
+  <li><b>name</b> — e.g. <code>"KnowledgeManager"</code></li>
+  <li><b>tools</b> — a list of tool names it can use (<code>add_tool("OrderLookup")</code>)</li>
+  <li><b>children</b> — the agents beneath it (<code>add_child(order_lookup_node)</code>)</li>
+</ul>
+
+<div class="box plain"><span class="lab">In plain terms</span>
+Think of an org chart. An <b>AgentNode</b> is one person's box: their name, the tools on
+their desk, and the people who report to them. <b>AgentTree</b> is the whole chart — it
+starts from the boss (the Supervisor) and links every box together.</div>
+
+<h3>AgentTree — wiring the boxes into a chart</h3>
+<p>The tree is built once, bottom-up: create each node, attach its tools, then
+<code>add_child</code> to hang workers under managers and managers under the supervisor.
+The result is a single root (Supervisor) you can walk downward.</p>
+
+<pre class="diagram">
+  build the chart:
+     root      = AgentNode("SupervisorAgent")
+     knowledge = AgentNode("KnowledgeManager")
+     order     = AgentNode("OrderLookup");  order.add_tool("order_db")
+     policy    = AgentNode("PolicySearch"); policy.add_tool("policy_kb")
+     knowledge.add_child(order)
+     knowledge.add_child(policy)
+     root.add_child(knowledge)        ...and so on for ResolutionManager
+     -> AgentTree(root)               one connected hierarchy
+</pre>
+
+<p><b>Path lookup.</b> Because every node has a name and children, you can find any node by
+a dotted path like <code>SupervisorAgent.ResolutionManager.RefundTool</code> — the tree
+walks name-by-name. This is how the UI highlights "where are we right now" and how the
+<i>tool path</i> in the State Inspector is resolved.</p>
+
+<div class="box tech"><span class="lab">Tech &amp; files</span>
+<code>orchestration/agent_tree.py</code> → <code>AgentNode</code> (name, tools, children,
+<code>find</code> by path, <code>to_dict</code>) and <code>AgentTree.build_default_tree()</code>.
+The <i>executable</i> graph is built separately in <code>src/agents/factory.py</code> →
+<code>build_supervisor()</code>, which creates SDK <code>Agent</code>s and wires children
+via <code>traced_as_tool()</code> (a thin wrapper over <code>agent.as_tool</code>). The
+AgentTree mirrors that graph for display.</div>
+
+<h3>Agent-as-tool vs handoff (why we chose as-tool)</h3>
+<table>
+<tr><th></th><th>Agent-as-tool (we use this)</th><th>Handoff (not used)</th></tr>
+<tr><td>Analogy</td><td>Ask a contractor, they return a result, <b>you keep the project</b>.</td>
+    <td>Transfer the phone call; <b>the other person now owns it</b>.</td></tr>
+<tr><td>Control after</td><td><b>Returns</b> to the caller</td><td><b>Transfers</b> away</td></tr>
+<tr><td>Call several &amp; combine?</td><td>Yes</td><td>No (one-way)</td></tr>
+<tr><td>Who writes the final answer</td><td>The caller (it aggregates)</td><td>The agent handed to</td></tr>
+</table>
+<p>Our supervisor must call <b>both</b> managers and <b>combine</b> their results into one
+reply for Maria — that's "call &amp; return", so we use <b>agent-as-tool</b>. Handoff would
+let a manager become the final responder, which can't aggregate.</p>
+</div>
+
+<!-- ===================== 5.1 CLIENTS / GATEWAY ===================== -->
+<div class="part">
+<h2>6 · Component deep-dives</h2>
+
+<h3>6.1 · Clients &amp; the API Gateway (FastAPI)</h3>
+<div class="box plain"><span class="lab">In plain terms</span>
+The API Gateway is the <b>front door</b> of the building. Everyone enters here. It checks
+your ID (login), makes sure you're not knocking too fast (rate limits), and shows you to
+the right room (your tenant/company's data).</div>
+<p><b>What it does:</b> authentication &amp; permissions, rate limiting, request validation,
+multi-tenant isolation, and — importantly — it <b>opens the live stream</b> back to the
+customer (see 6.2). It is a thin, fast layer; it does no thinking itself.</p>
+<div class="box usecase"><span class="lab">In our support assistant</span>
+Maria's chat widget calls the gateway. The gateway confirms she's logged in, mints a
+<code>request_id</code> for this ticket, starts the durable job, and opens an SSE stream so
+her screen can show progress live.</div>
+<div class="box tech"><span class="lab">Tech</span>FastAPI (Python). Today the repo uses
+Streamlit as the only entry point; in production FastAPI becomes the API, and Streamlit (or
+a React app) is just one client.</div>
+</div>
+
+<!-- ===================== 5.2 STREAMING ===================== -->
+<div class="section">
+<h3>6.2 · Streaming — how the customer sees progress live</h3>
+<p>A long job is boring if the screen just spins. We <b>stream</b> progress so Maria sees
+"Looking up your order… Checking the refund policy… Drafting your reply…" as it happens.
+Three ideas make this work.</p>
+
+<h4>(a) What is a FastAPI streaming response?</h4>
+<div class="box plain"><span class="lab">In plain terms</span>
+Normally a web server cooks the whole meal and brings one full plate. A <b>streaming
+response</b> brings food out dish by dish as it's ready. The connection stays open and
+each piece is sent the moment it exists.</div>
+<p>Technically, instead of returning a finished string, the endpoint returns a
+<code>StreamingResponse</code> wrapping an <b>async generator</b>. Each time the generator
+<code>yield</code>s a chunk, FastAPI flushes it down the open connection. The browser
+receives bytes continuously rather than waiting for the end.</p>
+
+<h4>(b) What is SSE (Server-Sent Events)?</h4>
+<div class="box plain"><span class="lab">In plain terms</span>
+SSE is a <b>one-way radio broadcast</b> from server to browser over a single, long-lived
+HTTP connection. The server keeps sending little text messages; the browser listens and
+reacts. It's simpler than WebSockets (which are two-way) and perfect when only the server
+needs to push.</div>
+<p>The format is just text: the server sends lines like <code>data: {...}\n\n</code>. The
+browser uses the built-in <code>EventSource</code> object to receive each event and update
+the screen. The response's content type is <code>text/event-stream</code>.</p>
+
+<h4>(c) How do the agents use it?</h4>
+<p>The agents don't talk to the browser directly. The flow is a relay:</p>
+<pre class="diagram">
+  agent does a step (or Claude emits a token)
+        |
+        v
+  HOOK fires  ----------------->  publishes an event to REDIS STREAM
+  (on_tool_start, etc.)           key = ticket request_id
+        :                                |
+        :                                v
+        :                    FastAPI SSE endpoint is "tailing" that stream
+        :                                |  yields:  data: {"step":"Looking up order"}\n\n
+        :                                v
+        :                          browser EventSource --> updates Maria's screen
+</pre>
+<div class="box usecase"><span class="lab">In our support assistant</span>
+When the <code>OrderLookup</code> tool starts, a hook publishes
+<code>{"step":"Looking up order #1234"}</code> to Redis. The SSE endpoint forwards it, and
+Maria instantly sees that line appear — even though the full resolution is still minutes
+(or days) away.</div>
+<div class="box tech"><span class="lab">Tech</span>FastAPI <code>StreamingResponse</code> with
+<code>media_type="text/event-stream"</code>; Redis Streams as the message bus; the browser's
+<code>EventSource</code> API. Token-level streaming comes from the model gateway; step-level
+events come from the hooks (next section).</div>
+</div>
+
+<!-- ===================== 5.3 SDK RUNTIME ===================== -->
+<div class="section">
+<h3>6.3 · The OpenAI Agents SDK runtime — the agent loop</h3>
+<div class="box plain"><span class="lab">In plain terms</span>
+The OpenAI Agents SDK is the <b>engine</b> that runs the loop from Section 4 for us. We just
+describe each agent (its instructions and tools); the SDK handles calling the model, parsing
+which tool it wants, running that tool, feeding the result back, and looping until done.</div>
+<p><b>What the SDK gives us</b> (so we don't hand-write it):</p>
+<ul>
+  <li><b>The loop</b> (<code>Runner.run</code>) — model → tools → repeat → final answer.</li>
+  <li><b>Tools</b> — decorate a Python function and the SDK exposes it to the model.</li>
+  <li><b>Agent-as-tool</b> — turn an agent into a callable tool for its parent.</li>
+  <li><b>Shared context</b> — a "scratchpad" object passed to every agent in the run.</li>
+  <li><b>Hooks</b> — callbacks on every lifecycle event (start/end of agent, tool, model).</li>
+  <li><b>Pause/resume</b> — built-in support for stopping for human approval.</li>
+  <li><b>tool_use_behavior</b> — e.g. an agent can "stop right after the first tool"
+  (our retrieval worker uses this so it doesn't waste a turn writing prose).</li>
+</ul>
+<div class="box key"><span class="lab">The scratchpad (shared context)</span>
+One blank "whiteboard" is created per ticket and passed into every agent. When
+<code>OrderLookup</code> finds the order details, it writes them on the whiteboard;
+<code>Emailer</code> later reads them off it. Only a short summary travels <i>up</i> the
+chain of command; the heavy materials travel <i>sideways</i> on the whiteboard. It's wiped
+when the ticket finishes — so tickets never leak into each other.</div>
+<div class="box tech"><span class="lab">Tech &amp; files</span><code>openai-agents[litellm]</code>.
+In the repo: <code>src/agents/factory.py</code> (builds the agents), <code>sdk_tools.py</code>
+(the <code>RunContext</code> scratchpad + tools + <code>traced_as_tool</code>), and the
+bridge in <code>agent_defs/supervisor.py</code> that calls <code>Runner.run</code>.</div>
+</div>
+
+<!-- ===================== 5.4 HOOKS ===================== -->
+<div class="section">
+<h3>6.4 · Hooks &amp; the Redis streaming callback handler</h3>
+<div class="box plain"><span class="lab">In plain terms</span>
+A <b>hook</b> is a doorbell that rings on every event inside a run: "an agent started",
+"a tool finished", "the model replied". We attach a listener to those doorbells to do two
+things: <b>(1) push a live update</b> to the customer, and <b>(2) record metrics</b>
+(time, tokens, cost).</p></div>
+<p>The SDK fires these lifecycle events; our hook object implements the matching methods:</p>
+<table>
+<tr><th>Hook fires when…</th><th>We do…</th></tr>
+<tr><td><code>on_agent_start</code> / <code>on_agent_end</code></td><td>count the agent, time it, emit "started/finished"</td></tr>
+<tr><td><code>on_tool_start</code> / <code>on_tool_end</code></td><td>publish a live "Looking up order…" step; time the tool</td></tr>
+<tr><td><code>on_llm_start</code> / <code>on_llm_end</code></td><td>record tokens &amp; cost <i>per agent</i></td></tr>
+</table>
+
+<h4>The "Redis streaming callback handler"</h4>
+<p>The hook doesn't know about browsers. It calls a small <b>callback handler</b> whose only
+job is "take this step and put it somewhere a stream can read it." In development that
+"somewhere" is an in-memory list (the Streamlit log). <b>In production it's a Redis Stream</b>
+— so the handler <code>publishes</code> each event to Redis, and the FastAPI SSE endpoint
+(6.2) tails it and forwards to the customer.</p>
+<pre class="diagram">
+   SDK lifecycle event --> Hook method --> callback handler --> Redis Stream --> SSE --> UI
+        (on_tool_start)     (our code)      (push/publish)      (durable bus)   (live)
+</pre>
+<div class="box usecase"><span class="lab">In our support assistant</span>
+Every visible line Maria sees ("Checking refund policy…", "Awaiting agent approval…") is a
+hook event that the Redis callback handler published. The same events double as the
+<b>audit log</b> of exactly what the assistant did, in order.</div>
+<div class="box tech"><span class="lab">Tech &amp; files</span><code>src/agents/sdk_hooks.py</code>
+(<code>OrchestrationHooks</code>, a subclass of the SDK's <code>RunHooks</code>) +
+<code>orchestration/streaming_handler.py</code> (the callback handler with
+<code>push_orchestration_step</code>). Crucial detail: hooks are passed into <b>every</b>
+sub-run, because the SDK does not automatically pass them down to agent-as-tool children.</div>
+</div>
+
+<!-- ===================== 5.5 MODEL GATEWAY ===================== -->
+<div class="section">
+<h3>6.5 · Model gateway — LiteLLM → Claude</h3>
+<div class="box plain"><span class="lab">In plain terms</span>
+The model gateway is a <b>universal power adapter</b> for AI models. Our agents speak one
+language; the gateway plugs that into Claude (or any model) and handles the messy parts:
+retries, fallbacks if a model is down, caching repeated questions, and counting the bill.</div>
+<ul>
+  <li><b>Routing &amp; fallback</b> — send to Claude; if it's unavailable, fail over.</li>
+  <li><b>Semantic cache</b> — if we already answered a near-identical question, reuse it
+  (saves money &amp; time).</li>
+  <li><b>Cost metering</b> — count tokens and dollars per customer/tenant.</li>
+  <li><b>Key management</b> — one safe place for API keys.</li>
+</ul>
+<div class="box tech"><span class="lab">Tech</span>LiteLLM. Today it runs <i>in-process</i>
+(<code>LitellmModel</code> → <code>anthropic/claude-opus-4-8</code>). In production it
+becomes a separate <b>LiteLLM proxy</b> service so all apps share routing, caching and
+budgets. The model is <b>Claude (Opus 4.8)</b>.</div>
+</div>
+
+<!-- ===================== 5.6 TOOLS ===================== -->
+<div class="section">
+<h3>6.6 · Tools / Actions — MCP &amp; sandboxed execution</h3>
+<div class="box plain"><span class="lab">In plain terms</span>
+Tools are the assistant's <b>hands</b>. Thinking (Claude) decides <i>what</i> to do; tools
+actually <i>do</i> it — read the order database, call the carrier's API, issue the refund.</div>
+<ul>
+  <li><b>MCP servers</b> (Model Context Protocol) — a standard "plug" so tools from anywhere
+  (the order system, the CRM) connect the same way, without custom glue each time.</li>
+  <li><b>Sandboxed execution</b> — if a tool runs code or touches money, run it in a locked
+  room (a sandbox) so a mistake can't damage the wider system.</li>
+</ul>
+<div class="box usecase"><span class="lab">In our support assistant</span>
+<code>OrderLookup</code> (read-only), <code>CarrierClaim</code> (calls an external API),
+<code>RefundTool</code> (moves money → guarded by human approval + sandbox),
+<code>PolicySearch</code> (RAG over policy docs).</div>
+</div>
+
+<!-- ===================== 5.7 MEMORY ===================== -->
+<div class="section">
+<h3>6.7 · Memory — the four kinds</h3>
+<div class="box plain"><span class="lab">In plain terms</span>
+Memory is not one thing. People have a notepad for the task in hand, a diary of past events,
+a set of facts they know, and skills they've learned. Agents need all four.</div>
+<table>
+<tr><th>Kind</th><th>Holds (in plain terms)</th><th>For Maria's ticket</th></tr>
+<tr><td><b>Working</b> (short-term)</td><td>the notepad for this task — the scratchpad</td>
+    <td>the current ticket: order details just looked up</td></tr>
+<tr><td><b>Episodic</b></td><td>a diary of what happened before</td>
+    <td>"Maria had a similar late delivery in March"</td></tr>
+<tr><td><b>Semantic</b></td><td>durable facts &amp; preferences</td>
+    <td>"Maria is premium and prefers email"</td></tr>
+<tr><td><b>Procedural</b></td><td>learned how-to / standard procedures</td>
+    <td>the official refund SOP the assistant follows</td></tr>
+</table>
+<p><b>The services that keep memory healthy:</b> <i>summarize</i> long chats so they fit;
+<i>reflect</i> — a background pass that reads recent tickets and promotes durable facts into
+semantic memory; <i>retrieve</i> the most relevant memories (by relevance + recency +
+importance); and <i>forget</i> stale ones.</p>
+<div class="box tech"><span class="lab">Tech</span>Redis (working), a Vector DB like pgvector/Qdrant
+(episodic &amp; semantic search), a Graph DB like Neo4j (relationships), an object store for
+big artifacts. Frameworks like Mem0 / Letta / Zep can provide this off the shelf. <i>Today the
+repo has only working memory (the scratchpad) and a toy keyword search — the rest is the
+production add.</i></div>
+</div>
+
+<!-- ===================== 5.8 TEMPORAL ===================== -->
+<div class="section">
+<h3>6.8 · Durable orchestration — Temporal &amp; long-running agents</h3>
+<div class="box plain"><span class="lab">In plain terms</span>
+Temporal is a <b>save-game system</b> for long jobs. After every step it saves progress.
+If the power goes out (a crash, a deploy), it reloads the save and continues from exactly
+where it stopped. It can also "sleep" for days at no cost and wake on cue.</div>
+
+<h4>Why we need it for a 3-day ticket</h4>
+<p>The agent loop normally lives inside a running process. If that process restarts while
+Maria's ticket is waiting on the carrier, the work would vanish. Temporal moves the
+<b>state out of the process</b> so nothing is lost.</p>
+
+<table>
+<tr><th>Agent idea</th><th>Temporal piece</th><th>Plain meaning</th></tr>
+<tr><td>the whole ticket job</td><td><b>Workflow</b></td><td>the durable, resumable script</td></tr>
+<tr><td>one model or tool call</td><td><b>Activity</b></td><td>a single retryable step</td></tr>
+<tr><td>"wait for agent approval"</td><td><b>Signal</b></td><td>pause for days at zero cost; resume on a message</td></tr>
+<tr><td>"check carrier again in 2 days"</td><td><b>Timer</b></td><td>a durable alarm clock</td></tr>
+</table>
+
+<div class="box usecase"><span class="lab">In our support assistant</span>
+Maria's ticket is one Temporal <b>Workflow</b>. Looking up the order is an <b>Activity</b>.
+Waiting for the human refund approval is a <b>Signal</b>. Waiting for the carrier's 2–3 day
+investigation is a <b>Timer</b>. If the servers are redeployed on day 2, the workflow simply
+resumes — Maria never notices.</div>
+<div class="box tech"><span class="lab">Tech</span>Temporal. It has a first-party integration
+with the OpenAI Agents SDK, so the agent graph runs <i>inside</i> workflows with little
+rewrite. (Alternatives: Restate, DBOS, AWS Step Functions.) The repo's HITL <code>RunState</code>
+JSON is a small-scale version of the same idea; Temporal generalizes it.</div>
+</div>
+
+<!-- ===================== 5.9 + 5.10 ===================== -->
+<div class="section">
+<h3>6.9 · Eventing — Redis Streams</h3>
+<div class="box plain"><span class="lab">In plain terms</span>
+Redis Streams is a <b>conveyor belt of events</b>. Anyone can drop an event on the belt;
+many readers can pick events off it. We use it to carry live updates and to record a tidy
+log of everything that happened.</div>
+<ul>
+  <li><b>Live updates</b> → feed the SSE stream to the customer (6.2).</li>
+  <li><b>Audit / replay</b> → every step is on the belt, so we can rebuild the timeline.</li>
+  <li><b>Work queues</b> → hand tasks to a pool of workers, with a "dead-letter" lane for
+  poison messages.</li>
+</ul>
+<p class="small">Temporal handles <i>durable orchestration</i>; Redis Streams handles
+<i>real-time eventing</i>. They are partners, not substitutes. (Swap in Kafka for very high
+scale.)</p>
+
+<h3>6.10 · Data stores &amp; Observability</h3>
+<table>
+<tr><th>Store</th><th>Holds</th></tr>
+<tr><td>Postgres</td><td>tickets, users, audit, structured state</td></tr>
+<tr><td>Redis</td><td>working memory, cache, locks, the event streams</td></tr>
+<tr><td>Vector DB</td><td>embeddings for episodic/semantic memory &amp; policy search</td></tr>
+<tr><td>Object store (S3)</td><td>large artifacts (attachments, generated documents)</td></tr>
+</table>
+<div class="box plain"><span class="lab">Observability — in plain terms</span>
+A <b>flight recorder</b>. For every ticket it records a timeline (traces), counters (metrics
+like cost &amp; tokens per agent), and logs. When something is slow or wrong, you can see
+exactly which agent or tool caused it.</div>
+<div class="box tech"><span class="lab">Tech</span>OpenTelemetry traces → Tempo; Prometheus +
+Grafana metrics; structured logs; optional LLM-trace UIs (Langfuse/Phoenix). <b>Already built
+into the repo</b> (per-agent cost/tokens), gated by <code>OBS_ENABLED</code>.</div>
+</div>
+
+<!-- ===================== 6. HITL ===================== -->
+<div class="part">
+<h2>7 · Human-in-the-loop (HITL)</h2>
+<p class="lead">Some steps are too risky to let the AI do alone — issuing a refund, for
+example. <b>HITL</b> means the system <b>pauses</b>, asks a human to approve, and only then
+continues. Here's exactly how that works.</p>
+
+<div class="box plain"><span class="lab">In plain terms</span>
+It's like a junior employee who can do most things, but needs a manager's signature for
+anything involving money. They prepare everything, then stop and wait at the manager's
+desk. When the signature comes, they carry on. If the manager says no, they take a different
+route.</div>
+
+<h3>How a pause happens (the effect on the graph)</h3>
+<p>We mark the risky step — the <code>RefundTool</code> (and the manager that calls it) — as
+<b>"needs approval"</b>. When the supervisor's loop reaches that tool call, the SDK does
+<b>not</b> run it. Instead it <b>stops the whole run</b> and reports an <b>interruption</b>
+(it says: "I want to call RefundTool with these arguments — approve?").</p>
+
+<pre class="diagram">
+  Supervisor loop ... reaches "call ResolutionManager -> RefundTool"
+        |
+        |   tool is marked needs_approval
+        v
+   RUN PAUSES HERE  (interruption raised)
+        |          the refund has NOT happened; the sub-run did NOT execute
+        v
+   save the exact state to disk  ----> wait for a human
+</pre>
+
+<div class="box key"><span class="lab">Effect on the graph — important</span>
+The pause happens <b>before</b> the guarded step runs. So nothing risky has occurred yet —
+the refund sub-task is "frozen at the doorway". Everything <i>before</i> it (looking up the
+order, checking policy) already ran and its results are safe on the scratchpad.</div>
+
+<h3>How the state is stored</h3>
+<p>At the pause, the SDK can serialize the <b>entire run</b> — the conversation, which step
+we're on, the pending tool call, and the scratchpad — into a <b>RunState</b> (a JSON blob).
+We wrap that blob inside a small record (the customer, the ticket, the pending action) and
+<b>save it</b>:</p>
+<ul>
+  <li><b>Today:</b> a JSON file per paused run in <code>.hitl_states/&lt;id&gt;.json</code>
+  (plus kept in memory).</li>
+  <li><b>Production:</b> a row in Postgres (and, with Temporal, the pause is just a workflow
+  blocked on a <b>Signal</b> — no manual saving needed at all).</li>
+</ul>
+<div class="box tech"><span class="lab">Tech &amp; files</span><code>orchestration/hitl_manager.py</code>
+stores/loads the paused state; the SDK <code>RunState</code> JSON lives inside the record's
+<code>pending_data</code>. The approval UI reads the pending action (which agent, what it
+wants to do) from that record.</div>
+
+<h3>How it resumes</h3>
+<p>When the human clicks <b>Approve</b> (maybe hours later):</p>
+<ol>
+  <li>Load the saved record and pull out the <b>RunState</b> JSON.</li>
+  <li>Rebuild the <b>same agent graph</b> (it's built deterministically, so it matches).</li>
+  <li>Restore the run from the JSON, <b>mark the pending tool call as approved</b>, and press
+  play again.</li>
+  <li>The loop continues <b>exactly where it stopped</b> — now the RefundTool actually runs,
+  the email goes out, the ticket moves on.</li>
+</ol>
+<p><b>Other choices the human has:</b></p>
+<table>
+<tr><th>Decision</th><th>What happens in the graph</th></tr>
+<tr><td><b>Approve</b></td><td>the frozen step runs; the loop continues to the final answer</td></tr>
+<tr><td><b>Reject</b></td><td>the step is refused; the supervisor's LLM is told "no" and picks a different path (e.g. escalate to a human agent instead of auto-refunding)</td></tr>
+<tr><td><b>Revise</b></td><td>the run restarts with edited input (e.g. "refund $40, not $80")</td></tr>
+</table>
+<div class="box usecase"><span class="lab">In our support assistant</span>
+The assistant prepares Maria's $80 refund and pauses. A support agent sees the request in a
+queue, confirms the double-charge, and clicks <b>Approve</b> two hours later. The workflow
+resumes, the refund is issued, and Maria gets her confirmation email — all without the
+assistant "starting over".</div>
+</div>
+
+<!-- ===================== 7. WALKTHROUGH ===================== -->
+<div class="part">
+<h2>8 · End-to-end walkthrough — the 3-day ticket</h2>
+<table>
+<tr><th>#</th><th>What happens</th><th>Which components</th></tr>
+<tr><td>1</td><td>Maria sends the message; the front door authenticates her and opens a live stream.</td><td>FastAPI gateway · SSE</td></tr>
+<tr><td>2</td><td>A durable job (workflow) starts for ticket #1234.</td><td>Temporal</td></tr>
+<tr><td>3</td><td>Memory is loaded: her past tickets, "premium, prefers email", the refund SOP.</td><td>Memory (episodic/semantic/procedural)</td></tr>
+<tr><td>4</td><td>Supervisor → KnowledgeManager: look up the order, search policy. Maria sees these steps live.</td><td>Agents SDK · Tools · Hooks → Redis → SSE</td></tr>
+<tr><td>5</td><td>Supervisor → ResolutionManager: open a carrier claim, prepare an $80 refund.</td><td>Agents SDK · Carrier API</td></tr>
+<tr><td>6</td><td><b>PAUSE</b> — the refund needs approval. State is saved; Maria sees "awaiting review".</td><td>HITL · RunState / Signal</td></tr>
+<tr><td>7</td><td>Two hours later a human approves. The job resumes; the refund is issued.</td><td>HITL resume</td></tr>
+<tr><td>8</td><td>The job <b>sleeps</b> waiting for the carrier's lost-package result.</td><td>Temporal Timer (days)</td></tr>
+<tr><td>9</td><td>(Servers are redeployed on day 2 — the job survives and keeps waiting.)</td><td>Temporal durability</td></tr>
+<tr><td>10</td><td>Day 3: the carrier confirms the loss (webhook). The job wakes, reships, emails Maria, closes the ticket.</td><td>Temporal Signal · Emailer</td></tr>
+<tr><td>11</td><td>The episode is saved to memory; a reflection pass notes "Maria had two late deliveries → flag account".</td><td>Memory write · reflection</td></tr>
+<tr><td>12</td><td>Full timeline, cost and token usage per agent are visible in dashboards.</td><td>Observability</td></tr>
+</table>
+<div class="box key"><span class="lab">The payoff</span>
+One ticket spanned <b>three days</b>, a <b>human approval</b>, a <b>server redeploy</b>, and a
+<b>multi-day external wait</b> — and the assistant handled it as one continuous, resumable job,
+keeping Maria informed the whole time. That is what this architecture buys you.</div>
+</div>
+
+<!-- ===================== 8. TECH STACK ===================== -->
+<div class="part">
+<h2>9 · Tech stack summary</h2>
+<table>
+<tr><th>Layer</th><th>Technology</th><th>Role in one line</th></tr>
+<tr><td>Client</td><td>Web/React or Streamlit</td><td>where the customer chats</td></tr>
+<tr><td>API &amp; streaming</td><td><b>FastAPI</b> + SSE (EventSource)</td><td>front door + live progress</td></tr>
+<tr><td>Durable workflows</td><td><b>Temporal</b></td><td>long-running, crash-proof jobs</td></tr>
+<tr><td>Agent framework</td><td><b>OpenAI Agents SDK</b></td><td>runs the supervisor→manager→worker loop</td></tr>
+<tr><td>Model access</td><td><b>LiteLLM</b> → <b>Claude (Opus 4.8)</b></td><td>the reasoning brain + routing/cache/cost</td></tr>
+<tr><td>Tools</td><td><b>MCP</b> servers + sandbox</td><td>the assistant's hands (order DB, carrier, refund)</td></tr>
+<tr><td>Eventing</td><td><b>Redis Streams</b></td><td>live events + audit + queues</td></tr>
+<tr><td>Memory</td><td>Redis + Vector DB (pgvector/Qdrant) + Graph (Neo4j)</td><td>working / episodic / semantic / procedural</td></tr>
+<tr><td>Data</td><td>Postgres + Redis + Object store (S3)</td><td>durable state, cache, artifacts</td></tr>
+<tr><td>Observability</td><td>OpenTelemetry + Prometheus/Grafana + Langfuse</td><td>traces, metrics, cost — the flight recorder</td></tr>
+<tr><td>Cross-cutting</td><td>Guardrails · budgets · Vault · Kubernetes</td><td>safety, cost control, secrets, scale</td></tr>
+</table>
+</div>
+
+<!-- ===================== 9. GLOSSARY ===================== -->
+<div class="part">
+<h2>10 · Glossary</h2>
+<table>
+<tr><th>Term</th><th>Plain-English meaning</th></tr>
+<tr><td><b>Agent</b></td><td>an LLM running in a loop that can use tools to reach a goal</td></tr>
+<tr><td><b>Turn</b></td><td>one lap of that loop (one "think, maybe act" cycle)</td></tr>
+<tr><td><b>max_turns</b></td><td>the hard lap-limit that stops a runaway loop</td></tr>
+<tr><td><b>Agent-as-tool</b></td><td>using one agent as a callable tool of another; control returns to the caller</td></tr>
+<tr><td><b>Handoff</b></td><td>transferring control to another agent entirely (one-way)</td></tr>
+<tr><td><b>AgentNode / AgentTree</b></td><td>the org-chart of agents — names, tools, who reports to whom</td></tr>
+<tr><td><b>Scratchpad (RunContext)</b></td><td>a shared whiteboard per ticket; materials travel sideways on it</td></tr>
+<tr><td><b>Hook</b></td><td>a doorbell that rings on each event (agent/tool/model start &amp; end)</td></tr>
+<tr><td><b>Callback handler</b></td><td>the listener that turns hook events into stream messages</td></tr>
+<tr><td><b>StreamingResponse</b></td><td>a web reply sent piece-by-piece as it's produced</td></tr>
+<tr><td><b>SSE</b></td><td>Server-Sent Events: a one-way server→browser live text stream</td></tr>
+<tr><td><b>HITL</b></td><td>human-in-the-loop: pause for a person to approve a risky step</td></tr>
+<tr><td><b>RunState</b></td><td>a saved snapshot of a paused run (so it can resume later)</td></tr>
+<tr><td><b>Workflow / Activity (Temporal)</b></td><td>the durable job / one retryable step inside it</td></tr>
+<tr><td><b>Signal / Timer (Temporal)</b></td><td>"wake on a message" / "wake at a time" — both survive restarts</td></tr>
+<tr><td><b>MCP</b></td><td>a standard way to plug external tools into the agent</td></tr>
+<tr><td><b>RAG</b></td><td>retrieval-augmented generation: fetch relevant docs, then answer using them</td></tr>
+</table>
+<hr>
+<p class="small">High-Level Design · Agentic Customer Support Assistant · Built on the
+OpenAI Agents SDK + Claude (LiteLLM), Temporal, FastAPI/SSE, Redis Streams, and agentic
+memory. This document describes the target production architecture; the current repository
+implements the agent graph, hooks, observability, and HITL, with the durable/streaming/memory
+layers as the production roadmap.</p>
+</div>
+
+</body>
+</html>

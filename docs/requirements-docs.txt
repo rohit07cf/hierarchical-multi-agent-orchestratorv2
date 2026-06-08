@@ -1,0 +1,4 @@
+# Tooling to regenerate the HLD PDF from docs/hld.html (not needed to run the app).
+#   pip install -r docs/requirements-docs.txt
+#   make docs
+weasyprint>=60
