@@ -26,6 +26,31 @@ from models.supervisor_output import (
 from src.agents.factory import MANAGER_TOOLS, MANAGER_WORKERS, TOOLS_BY_MANAGER
 from src.agents.sdk_tools import RunContext, _args, trace_from_run
 
+# Tokens that distinguish real source code from a directory-tree code fence
+# (the summarized answer often fences the project tree, which has none of these).
+_CODE_TOKENS = ("import ", "def ", "class ", "function ", "const ", "func ", "public ")
+
+
+def _preserve_code_artifact(final_answer: str, traces_by_name: dict) -> str:
+    """Guarantee generated code reaches the user.
+
+    The supervisor and build manager *summarize* their workers, so the
+    CodingAgent's full source — the actual deliverable — is otherwise dropped
+    from the user-facing answer (it only survives in the trace). Rather than
+    pay to relay a large codebase verbatim through two LLM layers, we attach it
+    structurally: if code was generated but the summarized answer carries none,
+    append the CodingAgent's complete output as a "Generated code" artifact.
+    """
+    coding = traces_by_name.get("CodingAgent")
+    if not coding:
+        return final_answer
+    code = (coding.get("final_response") or "").strip()
+    produced_code = "```" in code and any(t in code for t in _CODE_TOKENS)
+    answer_has_code = any(t in final_answer for t in _CODE_TOKENS)
+    if produced_code and not answer_has_code:
+        return f"{final_answer}\n\n---\n\n## 📦 Generated code\n\n{code}"
+    return final_answer
+
 
 def map_run_result(
     result: RunResult, user_query: str, ctx: RunContext
@@ -81,8 +106,11 @@ def map_run_result(
         ],
     )
 
+    final_answer = _preserve_code_artifact(
+        str(result.final_output or ""), traces_by_name
+    )
     return SupervisorOutput(
-        final_answer=str(result.final_output or ""),
+        final_answer=final_answer,
         subtasks=subtasks,
         decomposition=decomposition,
     )

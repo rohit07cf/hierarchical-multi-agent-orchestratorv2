@@ -206,6 +206,39 @@ async def test_retriever_keeps_relevant_docs_across_a_broader_search() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generated_code_survives_supervisor_summary() -> None:
+    """Regression: the supervisor summary drops code; the mapper re-attaches it.
+
+    Mirrors the live build run — the supervisor's answer only fences the project
+    tree (no real source), while the CodingAgent produced full code. The user
+    must still get the code.
+    """
+    q = "Build a FastAPI endpoint."
+    tree_only = "Here's your endpoint.\n```\nfastapi_items/\n└── app/main.py\n```\nDone."
+    real_code = (
+        "Here is the code:\n```python\nfrom fastapi import FastAPI\n\n"
+        "def main():\n    pass\n```"
+    )
+    script = {
+        "supervisor": [func_call("BuildManagerAgent", input=q), message(tree_only)],
+        "build": [
+            func_call("call_coding_agent", input="fastapi"),
+            func_call("call_review_agent", input="review"),
+            message("Build summary."),
+        ],
+        "coding": [
+            func_call("template_loader", template_name="fastapi_upload_endpoint"),
+            message(real_code),
+        ],
+        "review": [func_call("code_review_tool", code="x"), message("Reviewed.")],
+    }
+    _, _, out = await _run(script, q)
+    assert "## 📦 Generated code" in out.final_answer
+    assert "from fastapi import FastAPI" in out.final_answer  # the actual source
+    assert "def main" in out.final_answer
+
+
+@pytest.mark.asyncio
 async def test_build_path_hands_off_code_to_reviewer() -> None:
     """Coding generates code; it reaches the reviewer via the shared RunContext."""
     q = "Build a FastAPI upload endpoint and review it."
