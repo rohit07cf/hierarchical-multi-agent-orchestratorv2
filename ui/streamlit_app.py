@@ -76,6 +76,24 @@ def get_supervisor(model: str) -> SupervisorAgent:
     return st.session_state["supervisor"]
 
 
+_EVENT_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def run_async(coro):
+    """Run `coro` on a persistent event loop reused across Streamlit reruns.
+
+    Creating a fresh loop per interaction (``new_event_loop`` + ``close``)
+    orphans LiteLLM's background logging-worker task, which is bound to the
+    first loop and then spams "Task was destroyed / Event loop is closed" once
+    that loop closes. Reusing one long-lived loop keeps that worker valid.
+    """
+    global _EVENT_LOOP
+    if _EVENT_LOOP is None or _EVENT_LOOP.is_closed():
+        _EVENT_LOOP = asyncio.new_event_loop()
+    asyncio.set_event_loop(_EVENT_LOOP)
+    return _EVENT_LOOP.run_until_complete(coro)
+
+
 async def run_orchestration(user_input: str, model: str, mode: str) -> SupervisorOutput | None:
     """Run the supervisor orchestration asynchronously.
 
@@ -213,12 +231,7 @@ def render_main_content(model: str) -> None:
             # Resume orchestration
             with st.spinner("Resuming orchestration..."):
                 try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    result = loop.run_until_complete(
-                        resume_hitl(state_id, model)
-                    )
-                    loop.close()
+                    result = run_async(resume_hitl(state_id, model))
 
                     if result is not None:
                         # Orchestration completed (or ran to next pause)
@@ -296,12 +309,7 @@ def run_app() -> None:
 
         with st.spinner(f"Processing with {model} ({mode} mode)..."):
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                result = loop.run_until_complete(
-                    run_orchestration(user_input, model, mode)
-                )
-                loop.close()
+                result = run_async(run_orchestration(user_input, model, mode))
 
                 if result is not None:
                     # Full completion (non-HITL mode or no pause triggered)
