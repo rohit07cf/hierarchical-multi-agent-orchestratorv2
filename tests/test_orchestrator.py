@@ -115,3 +115,38 @@ async def test_pre_subtask_hook_can_pause_execution() -> None:
     assert call_count["n"] == 1
     assert state.status == "paused"
     assert response.content == "Execution paused for review."
+
+
+@pytest.mark.asyncio
+async def test_llm_repeating_a_manager_does_not_spin_to_max_turns() -> None:
+    """A manager runs at most once even if the LLM keeps re-picking it.
+
+    Regression for the observed run where gpt-4.1-nano repeatedly chose
+    ResearchManagerAgent, producing 6 near-identical subtasks until the
+    MAX_TURNS cap. The structural guard in `_decide_next_manager` must
+    discard any repeat selection and finish instead.
+    """
+    from src.models.trace import LLMMode
+
+    supervisor = RootSupervisorAgent()
+    # Force the LLM path on, then make the "LLM" misbehave exactly as the
+    # small model did: always ask for the same manager again.
+    supervisor.llm.mode = LLMMode.REAL
+    decide_calls = {"n": 0}
+
+    async def always_research(user_query, prior):
+        decide_calls["n"] += 1
+        return "ResearchManagerAgent", "always research (buggy)"
+
+    supervisor._llm_decide_next = always_research  # type: ignore[method-assign]
+
+    state, response = await supervisor.orchestrate(
+        "Summarize the architecture of this project."
+    )
+
+    assert state.status == "completed"
+    assert state.plan is not None
+    # ResearchManagerAgent must appear exactly once — not MAX_TURNS times.
+    agent_names = [t.agent_name for t in state.plan.tasks]
+    assert agent_names == ["ResearchManagerAgent"], agent_names
+    assert response.content

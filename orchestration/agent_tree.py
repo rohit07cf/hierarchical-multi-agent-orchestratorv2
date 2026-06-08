@@ -43,7 +43,7 @@ class AgentNode:
             self.tools.append(tool_name)
 
     def find(self, path: str) -> AgentNode | None:
-        """Find a node by dot-separated path (e.g., 'Supervisor.MathAgent').
+        """Find a node by dot-separated path (e.g., 'RootSupervisorAgent.BuildManagerAgent').
 
         Args:
             path: Dot-separated path from this node.
@@ -94,7 +94,7 @@ class AgentTree:
         """Find an agent node by its dot-separated path.
 
         Args:
-            path: Dot-separated path like 'Supervisor.MathAgent'.
+            path: Dot-separated path like 'RootSupervisorAgent.BuildManagerAgent'.
 
         Returns:
             The found AgentNode, or None.

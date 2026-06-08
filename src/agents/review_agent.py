@@ -30,7 +30,7 @@ class ReviewAgent(ReasoningAgent):
     name = "ReviewAgent"
     system_prompt = _SYSTEM_PROMPT
 
-    def __init__(self, model: str = "gpt-4.1-nano") -> None:
+    def __init__(self, model: str = "claude-opus-4-8") -> None:
         super().__init__(model=model)
         self.tools = [
             ToolSpec(
@@ -120,7 +120,7 @@ class ReviewAgent(ReasoningAgent):
         )
         return (
             f"[mock-llm] {review.summary}\n{bullets}\n"
-            "Set OPENAI_API_KEY for a synthesized review narrative."
+            "Set ANTHROPIC_API_KEY for a synthesized review narrative."
         )
 
     def _extra_data(self, invocations: list[ToolInvocation]) -> dict[str, Any]:

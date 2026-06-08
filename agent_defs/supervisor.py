@@ -130,24 +130,13 @@ class SupervisorAgent:
     call routes through the new hierarchical orchestrator in `src/`.
     """
 
-    # Backward-compatible map of the *old* worker agent names. The new
-    # system does not use these; the field is preserved only so any
-    # caller that introspected `CHILD_AGENT_MAP` continues to resolve.
-    CHILD_AGENT_MAP: dict[str, str] = {
-        "SimpleAgent": "agent_defs.simple_agent.SimpleAgentDef",
-        "MathAgent": "agent_defs.math_agent.MathAgentDef",
-        "EchoAgent": "agent_defs.echo_agent.EchoAgentDef",
-        "ClassifierAgent": "agent_defs.classifier_agent.ClassifierAgentDef",
-    }
-
-    def __init__(self, model: str = "gpt-4.1-nano") -> None:
+    def __init__(self, model: str = "claude-opus-4-8") -> None:
         self.name = "RootSupervisorAgent"
         self.model = model
         self._state = AgentState(tool_path=self.name)
         self._root = RootSupervisorAgent(model=model)
         self.streaming_handler: Any | None = None
-        # Expose the live hierarchy (managers + workers) plus the legacy
-        # worker agents under their original names for backward compat.
+        # Expose the live hierarchy (managers + workers) under their names.
         self._child_agents: dict[str, Any] = {
             "ResearchManagerAgent": self._root.managers["ResearchManagerAgent"],
             "BuildManagerAgent": self._root.managers["BuildManagerAgent"],

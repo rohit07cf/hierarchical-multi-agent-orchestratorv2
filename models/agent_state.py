@@ -84,7 +84,7 @@ class AgentState(BaseModel):
     )
     tool_path: str = Field(
         default="",
-        description="Hierarchical path (e.g. 'Supervisor.ClassifierAgent') for tree traversal",
+        description="Hierarchical path (e.g. 'RootSupervisorAgent.ResearchManagerAgent') for tree traversal",
     )
     iteration_count: int = Field(
         default=0,

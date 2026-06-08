@@ -11,8 +11,10 @@ graphviz>=0.20.0
 # Environment management
 python-dotenv>=1.0.1
 
-# Optional: real LLM completions (only used when OPENAI_API_KEY is set).
-openai>=1.66.0
+# Optional: real LLM completions via Claude (only used when
+# ANTHROPIC_API_KEY is set). Needs a recent SDK for adaptive thinking on
+# Opus 4.8; upgrade with `pip install -U anthropic` if a call 400s.
+anthropic>=0.69.0
 
 # Observability — OpenTelemetry (traces) + Prometheus (metrics) +
 # structlog (structured logs). All open standards, no vendor SDKs.
@@ -24,14 +26,6 @@ opentelemetry-exporter-otlp-proto-grpc>=1.27.0
 prometheus-client>=0.21.0
 structlog>=24.4.0
 psutil>=6.0.0
-
-# Optional: legacy openai-agents SDK — only required by the old
-# agent_defs/{simple,math,echo,classifier}_agent.py modules. The new
-# 3-layer hierarchy does not depend on it.
-# openai-agents>=0.0.7
-
-# Optional: Temporal workflow durability layer.
-# temporalio>=1.9.0
 
 # Test deps
 pytest>=8.0.0

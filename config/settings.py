@@ -14,16 +14,10 @@ class Settings(BaseSettings):
     All configuration is centralized here and accessed via get_settings().
     """
 
-    # OpenAI
-    openai_api_key: str = Field(default="", description="OpenAI API key")
-    openai_model: str = Field(default="gpt-4.1-nano", description="Default OpenAI model")
-
-    # Temporal
-    temporal_host: str = Field(default="localhost", description="Temporal server host")
-    temporal_port: int = Field(default=7233, description="Temporal server port")
-    temporal_task_queue: str = Field(
-        default="agent-orchestration-queue",
-        description="Temporal task queue name",
+    # Anthropic (Claude)
+    anthropic_api_key: str = Field(default="", description="Anthropic API key")
+    anthropic_model: str = Field(
+        default="claude-opus-4-8", description="Default Claude model"
     )
 
     # Application

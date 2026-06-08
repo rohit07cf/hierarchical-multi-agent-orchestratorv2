@@ -133,13 +133,13 @@ def render_llm_mode_banner() -> None:
     """Show a banner indicating whether agents run in real or mock LLM mode."""
     import os
 
-    if os.environ.get("OPENAI_API_KEY"):
-        st.success("LLM mode: **real** (OPENAI_API_KEY set)")
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        st.success("LLM mode: **real** (ANTHROPIC_API_KEY set)")
     else:
         st.warning(
             "LLM mode: **mock** — agents emit reasoning traces and run "
             "deterministic tools, but synthesis is a labelled placeholder. "
-            "Set `OPENAI_API_KEY` for real natural-language reasoning."
+            "Set `ANTHROPIC_API_KEY` for real natural-language reasoning."
         )
 
 

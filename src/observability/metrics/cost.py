@@ -4,7 +4,7 @@ LLM cost is the line item finance asks about and the one most AI systems
 fly blind on. We make it a first-class signal:
 
 - ``estimate_tokens`` — a cheap heuristic (~4 chars/token) used when the
-  provider does not return usage (mock mode, streaming, or non-OpenAI
+  provider does not return usage (mock mode, streaming, or non-Anthropic
   backends). It is explicitly approximate; real usage from the API
   response always wins when present.
 - ``PRICING`` — per-model $/1K tokens. Kept as plain data so updating a
@@ -31,13 +31,14 @@ class ModelPrice:
     output_per_1k: float
 
 
-# $/1K tokens. Update as provider pricing changes.
+# $/1K tokens. Update as provider pricing changes. Claude pricing is quoted
+# per 1M tokens by Anthropic; divide by 1000 for the per-1K figures here.
 PRICING: dict[str, ModelPrice] = {
-    "gpt-4.1-nano": ModelPrice(0.0001, 0.0004),
-    "gpt-4.1-mini": ModelPrice(0.0004, 0.0016),
-    "gpt-4.1": ModelPrice(0.002, 0.008),
-    "gpt-4o": ModelPrice(0.0025, 0.01),
-    "gpt-4o-mini": ModelPrice(0.00015, 0.0006),
+    "claude-opus-4-8": ModelPrice(0.005, 0.025),
+    "claude-opus-4-7": ModelPrice(0.005, 0.025),
+    "claude-opus-4-6": ModelPrice(0.005, 0.025),
+    "claude-sonnet-4-6": ModelPrice(0.003, 0.015),
+    "claude-haiku-4-5": ModelPrice(0.001, 0.005),
 }
 
 _DEFAULT_PRICE = ModelPrice(0.0, 0.0)

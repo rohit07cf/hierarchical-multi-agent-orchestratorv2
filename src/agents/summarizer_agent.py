@@ -64,12 +64,12 @@ class SummarizerAgent(ReasoningAgent):
             names = ", ".join(d["name"] for d in docs[:3])
             return (
                 f"[mock-llm] Would summarize {len(docs)} document(s) "
-                f"({names}). Set OPENAI_API_KEY for real natural-language summary."
+                f"({names}). Set ANTHROPIC_API_KEY for real natural-language summary."
             )
         snippet = request.query.strip().splitlines()[0][:160]
         return (
             f"[mock-llm] Would summarize the input ({len(request.query)} "
-            f"chars, starting with {snippet!r}). Set OPENAI_API_KEY for "
+            f"chars, starting with {snippet!r}). Set ANTHROPIC_API_KEY for "
             "real natural-language summary."
         )
 

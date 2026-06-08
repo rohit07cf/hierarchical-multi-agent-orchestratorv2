@@ -23,6 +23,7 @@ from orchestration.hitl_manager import HITLManager
 from orchestration.streaming_handler import StreamingCallbackHandler
 from ui.components import (
     render_conversation_history,
+    render_example_queries,
     render_hitl_controls,
     render_message_input,
     render_model_selector,
@@ -62,7 +63,7 @@ def get_supervisor(model: str) -> SupervisorAgent:
     """Get or create the supervisor agent.
 
     Args:
-        model: OpenAI model name to use.
+        model: Claude model name to use.
 
     Returns:
         SupervisorAgent instance.
@@ -80,7 +81,7 @@ async def run_orchestration(user_input: str, model: str, mode: str) -> Superviso
 
     Args:
         user_input: The user's request.
-        model: OpenAI model to use.
+        model: Claude model to use.
         mode: 'auto', 'manual', or 'hitl'.
 
     Returns:
@@ -103,7 +104,7 @@ async def resume_hitl(state_id: str, model: str) -> SupervisorOutput | None:
 
     Args:
         state_id: The paused state ID to resume.
-        model: OpenAI model to use.
+        model: Claude model to use.
 
     Returns:
         SupervisorOutput if complete, or None if paused again at next checkpoint.
@@ -269,8 +270,18 @@ def run_app() -> None:
 
     model = render_sidebar()
 
+    # Example queries — expanded for first-time users (empty conversation),
+    # collapsed once a conversation is underway.
+    example_query = render_example_queries(
+        expanded=not st.session_state["messages"]
+    )
+
     # Message input
     user_input = render_message_input()
+
+    # A clicked example acts as a submitted (auto-mode) request.
+    if example_query and not user_input:
+        user_input = example_query
 
     if user_input:
         # Add user message to history

@@ -10,6 +10,45 @@ import streamlit as st
 from models.agent_state import AgentState, HITLAction, HITLActionType, HITLCheckpointType
 from models.streaming_models import StreamingModelResponseStep, StreamingStatus
 from orchestration.hitl_manager import HITLManager
+from ui.example_queries import EXAMPLE_CATEGORIES
+
+
+def render_example_queries(expanded: bool = True) -> str | None:
+    """Render clickable example queries to onboard new users.
+
+    Examples are grouped by the agent path they exercise. Clicking one
+    returns its query text so the caller can run it immediately (in auto
+    mode), so new users can explore the orchestrator without having to
+    invent a prompt.
+
+    Args:
+        expanded: Whether the section starts expanded. Pass ``True`` for
+            first-time users (empty conversation) and ``False`` afterwards.
+
+    Returns:
+        The selected example query text if a button was clicked, else None.
+    """
+    selected: str | None = None
+    with st.expander("💡 New here? Try an example query", expanded=expanded):
+        st.caption(
+            "Click any example to run it. Each one exercises a different "
+            "agent path — hover a button to see which agents it triggers."
+        )
+        for category in EXAMPLE_CATEGORIES:
+            st.markdown(f"**{category.icon} {category.title}** — {category.description}")
+            cols = st.columns(len(category.examples))
+            for col, example in zip(cols, category.examples):
+                with col:
+                    if st.button(
+                        example.label,
+                        key=f"example_{example.label}",
+                        help=f"Routes via: {example.path}",
+                        use_container_width=True,
+                    ):
+                        selected = example.query
+    if selected:
+        st.session_state["orchestration_mode"] = "auto"
+    return selected
 
 
 def render_message_input() -> str | None:
@@ -262,7 +301,12 @@ def render_model_selector() -> str:
     Returns:
         The selected model name.
     """
-    models = ["gpt-4.1-nano", "gpt-4.1-mini", "gpt-4.1", "gpt-4o", "gpt-4o-mini"]
+    models = [
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+    ]
     return st.selectbox("Model:", models, index=0, key="model_select") or models[0]
 
 

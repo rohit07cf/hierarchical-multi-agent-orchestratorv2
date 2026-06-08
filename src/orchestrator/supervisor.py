@@ -12,7 +12,7 @@ invoke next. Each turn:
 A final LLM call aggregates the responses into a single user-facing
 answer.
 
-When `OPENAI_API_KEY` is unset, both the per-turn decision and the
+When `ANTHROPIC_API_KEY` is unset, both the per-turn decision and the
 aggregation fall back to deterministic rules (the intent-based `Router`
 and a simple concatenation), so the orchestration shape stays correct
 offline.
@@ -28,7 +28,8 @@ from typing import Any
 from src.agents.base import ReasoningAgent
 from src.agents.build_manager import BuildManagerAgent
 from src.agents.research_manager import ResearchManagerAgent
-from src.llm.client import get_llm_client
+from src.llm.client import DEFAULT_MODEL, get_llm_client
+from src.llm.client import _extract_json, _first_text
 from src.models.responses import AgentResponse
 from src.models.state_models import (
     AgentTask,
@@ -89,7 +90,7 @@ class RootSupervisorAgent:
     # be invoked for a single user request.
     MAX_TURNS = 6
 
-    def __init__(self, model: str = "gpt-4.1-nano") -> None:
+    def __init__(self, model: str = DEFAULT_MODEL) -> None:
         self.model = model
         self.llm = get_llm_client(model)
         self.router = Router()
@@ -177,6 +178,26 @@ class RootSupervisorAgent:
             finally:
                 M.ROUTING_LATENCY.labels(source).observe(time.perf_counter() - start)
 
+            # Structural invariant: a manager runs at most once per request.
+            # The planner prompt asks the LLM for this and the router
+            # fallback enforces it, but the LLM path did not — smaller models
+            # sometimes re-pick a manager that already ran (the original
+            # gpt-4.1-nano backend did this repeatedly). Left unchecked, the
+            # LLM path can re-pick a manager and spin until MAX_TURNS,
+            # re-running the same manager and emitting duplicate subtasks.
+            # Discard any repeat selection and treat it as "finish".
+            if manager is not None and any(manager == name for name, _ in prior):
+                logger.info(
+                    "Supervisor re-picked %s which already ran this request; "
+                    "treating as finish.",
+                    manager,
+                )
+                reasoning = (
+                    f"{manager} already ran for this request; finishing to "
+                    "avoid a duplicate invocation."
+                )
+                manager = None
+
             decision_label = manager or "finish"
             M.ROUTING_DECISIONS_TOTAL.labels(decision_label, source).inc()
             if manager:
@@ -208,7 +229,7 @@ class RootSupervisorAgent:
         self, user_query: str, prior: list[tuple[str, str]]
     ) -> tuple[str | None, str]:
         """Ask the LLM which manager to call next (or null to finish)."""
-        from openai import AsyncOpenAI
+        from anthropic import AsyncAnthropic
 
         if prior:
             history_block = "Managers that have already run:\n\n" + "\n\n".join(
@@ -224,22 +245,21 @@ class RootSupervisorAgent:
             f"{history_block}\n\n"
             f"Available managers:\n{available_block}\n\n"
             "Decide which manager to invoke next, or finish if no further "
-            "work is needed. Respond with JSON in this exact shape:\n"
+            "work is needed. Respond with ONLY a JSON object — no markdown, "
+            "no preamble — in this exact shape:\n"
             '{"reasoning": "<one-line rationale>", '
             '"next_manager": "<manager name>" | null}'
         )
-        client = AsyncOpenAI()
-        response = await client.chat.completions.create(
+        client = AsyncAnthropic()
+        response = await client.messages.create(
             model=self.model,
-            messages=[
-                {"role": "system", "content": _PLANNER_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1,
+            max_tokens=4096,
+            thinking={"type": "adaptive"},
+            system=_PLANNER_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
         )
-        raw = response.choices[0].message.content or "{}"
-        parsed = json.loads(raw)
+        raw = _first_text(response)
+        parsed = json.loads(_extract_json(raw))
         next_manager = parsed.get("next_manager")
         if next_manager not in self.managers:
             next_manager = None
@@ -543,7 +563,7 @@ class RootSupervisorAgent:
     async def _llm_aggregate(
         self, user_query: str, responses: list[AgentResponse]
     ) -> str:
-        from openai import AsyncOpenAI
+        from anthropic import AsyncAnthropic
 
         joined = "\n\n".join(
             f"### {r.agent_name}\n{r.content}" for r in responses if r.content
@@ -554,13 +574,12 @@ class RootSupervisorAgent:
             "Write a concise, natural answer for the user. Do not mention "
             "agent names or routing decisions."
         )
-        client = AsyncOpenAI()
-        response = await client.chat.completions.create(
+        client = AsyncAnthropic()
+        response = await client.messages.create(
             model=self.model,
-            messages=[
-                {"role": "system", "content": _AGGREGATOR_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
+            max_tokens=8192,
+            thinking={"type": "adaptive"},
+            system=_AGGREGATOR_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
         )
-        return response.choices[0].message.content or ""
+        return _first_text(response)

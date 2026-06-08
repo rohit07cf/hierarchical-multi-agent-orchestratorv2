@@ -91,9 +91,9 @@ async def run_demo() -> None:
     # Wire observability from the environment. With OBS_ENABLED unset this
     # is a no-op beyond structured logging, so the demo runs unchanged.
     init_observability()
-    if not os.environ.get("OPENAI_API_KEY"):
+    if not os.environ.get("ANTHROPIC_API_KEY"):
         print(
-            "WARNING: OPENAI_API_KEY is not set — agents run in mock mode. "
+            "WARNING: ANTHROPIC_API_KEY is not set — agents run in mock mode. "
             "Reasoning traces and tool outputs are real; synthesis is a "
             "labelled placeholder.\n"
         )

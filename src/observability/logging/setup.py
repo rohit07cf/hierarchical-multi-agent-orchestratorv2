@@ -90,7 +90,7 @@ def setup_logging(config: ObservabilityConfig) -> None:
         root.handlers.clear()
         root.addHandler(handler)
         root.setLevel(level)
-        for noisy in ("httpx", "httpcore", "openai", "urllib3", "asyncio"):
+        for noisy in ("httpx", "httpcore", "anthropic", "urllib3", "asyncio"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
         return
 
@@ -134,7 +134,7 @@ def setup_logging(config: ObservabilityConfig) -> None:
     root.setLevel(level)
 
     # Tame noisy third parties so production logs stay signal-dense.
-    for noisy in ("httpx", "httpcore", "openai", "urllib3", "asyncio"):
+    for noisy in ("httpx", "httpcore", "anthropic", "urllib3", "asyncio"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 

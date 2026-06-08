@@ -52,7 +52,7 @@ class ReasoningAgent(ABC):
     system_prompt: str = "You are a helpful agent."
     tools: list[ToolSpec] = []
 
-    def __init__(self, model: str = "gpt-4.1-nano", llm: LLMClient | None = None) -> None:
+    def __init__(self, model: str = "claude-opus-4-8", llm: LLMClient | None = None) -> None:
         self.model = model
         self.llm = llm or get_llm_client(model)
 

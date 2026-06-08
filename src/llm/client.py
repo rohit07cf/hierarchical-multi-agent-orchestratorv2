@@ -9,7 +9,8 @@ The client exposes two operations:
 - `synthesize()` — given the tool results, produce the final natural-
   language response.
 
-When `OPENAI_API_KEY` is unset the client switches to **mock mode**:
+Real completions go through the **Anthropic Messages API** (Claude). When
+`ANTHROPIC_API_KEY` is unset the client switches to **mock mode**:
 `reason()` falls back to a per-agent mock policy (so the orchestration
 shape stays visible offline) and `synthesize()` returns a clearly
 labelled placeholder. The UI surfaces the mock-mode banner.
@@ -21,7 +22,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from src.models.trace import (
     AgentReasoning,
@@ -42,12 +43,51 @@ AsyncMockReasonPolicy = Callable[[], Awaitable[AgentReasoning]]
 
 MOCK_PREFIX = "[mock-llm]"
 
+# Default Claude model for every agent. Opus 4.8 is the most capable model
+# and follows routing/tool-selection instructions far more faithfully than
+# the small models this project previously used.
+DEFAULT_MODEL = "claude-opus-4-8"
+
+# max_tokens is required by the Anthropic API. Both call types use adaptive
+# thinking, so the budget has to cover the (hidden) thinking tokens plus the
+# visible answer — kept well under the streaming threshold so the simple
+# non-streaming path stays safe.
+_MAX_TOKENS_REASON = 8192
+_MAX_TOKENS_SYNTH = 8192
+
+
+def _first_text(response: Any) -> str:
+    """Return the first text block from an Anthropic response.
+
+    With adaptive thinking the response may lead with a `thinking` block;
+    the user-facing content is the first `text` block.
+    """
+    for block in getattr(response, "content", []) or []:
+        if getattr(block, "type", None) == "text":
+            return block.text or ""
+    return ""
+
+
+def _extract_json(text: str) -> str:
+    """Best-effort extraction of the JSON object from a model response.
+
+    We instruct the model to return raw JSON, but defensively strip any
+    stray prose or markdown fences by slicing to the outermost braces.
+    """
+    if not text:
+        return "{}"
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1]
+    return text
+
 
 @dataclass
 class LLMClient:
-    """Thin wrapper around OpenAI Chat Completions with mock fallback."""
+    """Thin wrapper around the Anthropic Messages API with mock fallback."""
 
-    model: str = "gpt-4.1-nano"
+    model: str = DEFAULT_MODEL
     mode: LLMMode = LLMMode.MOCK
 
     @property
@@ -80,7 +120,7 @@ class LLMClient:
                     reasoning = AgentReasoning(
                         reasoning=(
                             f"{MOCK_PREFIX} {agent_name} running in mock mode. "
-                            "Set OPENAI_API_KEY for real reasoning."
+                            "Set ANTHROPIC_API_KEY for real reasoning."
                         ),
                         selected_tools=[],
                         skipped_tools=[t.name for t in available_tools],
@@ -91,7 +131,7 @@ class LLMClient:
                 return reasoning
 
             try:
-                return await self._openai_reason(
+                return await self._anthropic_reason(
                     agent_name, system_prompt, user_prompt, available_tools, obs
                 )
             except Exception as e:
@@ -123,7 +163,7 @@ class LLMClient:
                 return out
 
             try:
-                return await self._openai_synthesize(
+                return await self._anthropic_synthesize(
                     system_prompt, user_prompt, tool_results, obs
                 )
             except Exception as e:
@@ -131,9 +171,9 @@ class LLMClient:
                 obs.mark_failure()
                 return self._default_mock_synthesize(agent_name, tool_results)
 
-    # ----------------- OpenAI implementations -----------------
+    # ----------------- Anthropic implementations -----------------
 
-    async def _openai_reason(
+    async def _anthropic_reason(
         self,
         agent_name: str,
         system_prompt: str,
@@ -141,8 +181,8 @@ class LLMClient:
         available_tools: list[ToolSpec],
         obs,
     ) -> AgentReasoning:
-        """Real OpenAI reasoning call — asks for JSON-formatted decision."""
-        from openai import AsyncOpenAI
+        """Real Claude reasoning call — asks for a JSON-formatted decision."""
+        from anthropic import AsyncAnthropic
 
         if not available_tools:
             tools_block = "(no tools available — respond with empty selected_tools)"
@@ -155,33 +195,32 @@ class LLMClient:
             f"{user_prompt}\n\n"
             f"Available tools for {agent_name}:\n{tools_block}\n\n"
             "Decide which tools (if any) you need to call to satisfy the "
-            "request. Respond with JSON in this exact shape:\n"
+            "request. Respond with ONLY a JSON object — no markdown, no "
+            "preamble — in this exact shape:\n"
             '{"reasoning": "<short chain-of-thought>", '
             '"selected_tools": [{"tool_name": "<name>", "rationale": "<why>", '
             '"arguments": {"<arg>": <value>}}], '
             '"skipped_tools": ["<name>", ...]}'
         )
 
-        client = AsyncOpenAI()
-        response = await client.chat.completions.create(
+        client = AsyncAnthropic()
+        response = await client.messages.create(
             model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": full_prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1,
+            max_tokens=_MAX_TOKENS_REASON,
+            thinking={"type": "adaptive"},
+            system=system_prompt,
+            messages=[{"role": "user", "content": full_prompt}],
         )
         # Prefer real provider usage; fall back to the char-heuristic.
         usage = getattr(response, "usage", None)
+        text = _first_text(response)
         obs.record_usage(
-            input_tokens=getattr(usage, "prompt_tokens", None),
-            output_tokens=getattr(usage, "completion_tokens", None),
+            input_tokens=getattr(usage, "input_tokens", None),
+            output_tokens=getattr(usage, "output_tokens", None),
             prompt_text=user_prompt,
-            completion_text=response.choices[0].message.content,
+            completion_text=text,
         )
-        raw = response.choices[0].message.content or "{}"
-        parsed = json.loads(raw)
+        parsed = json.loads(_extract_json(text))
         return AgentReasoning(
             reasoning=parsed.get("reasoning", ""),
             selected_tools=[
@@ -195,15 +234,15 @@ class LLMClient:
             skipped_tools=list(parsed.get("skipped_tools", [])),
         )
 
-    async def _openai_synthesize(
+    async def _anthropic_synthesize(
         self,
         system_prompt: str,
         user_prompt: str,
         tool_results: list[ToolInvocation],
         obs,
     ) -> str:
-        """Real OpenAI synthesis call — free-form completion."""
-        from openai import AsyncOpenAI
+        """Real Claude synthesis call — free-form completion."""
+        from anthropic import AsyncAnthropic
 
         if not tool_results:
             tool_block = "(no tools were called)"
@@ -221,20 +260,19 @@ class LLMClient:
             "to satisfy the request. Do not mention internal tool names."
         )
 
-        client = AsyncOpenAI()
-        response = await client.chat.completions.create(
+        client = AsyncAnthropic()
+        response = await client.messages.create(
             model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
+            max_tokens=_MAX_TOKENS_SYNTH,
+            thinking={"type": "adaptive"},
+            system=system_prompt,
+            messages=[{"role": "user", "content": prompt}],
         )
         usage = getattr(response, "usage", None)
-        content = response.choices[0].message.content or ""
+        content = _first_text(response)
         obs.record_usage(
-            input_tokens=getattr(usage, "prompt_tokens", None),
-            output_tokens=getattr(usage, "completion_tokens", None),
+            input_tokens=getattr(usage, "input_tokens", None),
+            output_tokens=getattr(usage, "output_tokens", None),
             prompt_text=prompt,
             completion_text=content,
         )
@@ -250,18 +288,18 @@ class LLMClient:
         if not tool_results:
             return (
                 f"{MOCK_PREFIX} {agent_name} produced no tool output. "
-                "Set OPENAI_API_KEY for real synthesis."
+                "Set ANTHROPIC_API_KEY for real synthesis."
             )
         lines = [
             f"{MOCK_PREFIX} {agent_name} ran the following tool(s); set "
-            "OPENAI_API_KEY for natural-language synthesis.",
+            "ANTHROPIC_API_KEY for natural-language synthesis.",
         ]
         for ti in tool_results:
             lines.append(f"- {ti.tool_name}: {ti.result_preview}")
         return "\n".join(lines)
 
 
-def get_llm_client(model: str = "gpt-4.1-nano") -> LLMClient:
+def get_llm_client(model: str = DEFAULT_MODEL) -> LLMClient:
     """Return an LLMClient configured from the environment."""
-    mode = LLMMode.REAL if os.environ.get("OPENAI_API_KEY") else LLMMode.MOCK
+    mode = LLMMode.REAL if os.environ.get("ANTHROPIC_API_KEY") else LLMMode.MOCK
     return LLMClient(model=model, mode=mode)

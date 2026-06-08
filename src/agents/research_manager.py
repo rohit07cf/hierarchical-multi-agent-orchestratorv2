@@ -40,7 +40,7 @@ class ResearchManagerAgent(ReasoningAgent):
     name = "ResearchManagerAgent"
     system_prompt = _SYSTEM_PROMPT
 
-    def __init__(self, model: str = "gpt-4.1-nano") -> None:
+    def __init__(self, model: str = "claude-opus-4-8") -> None:
         super().__init__(model=model)
         self.rag = RAGAgent(model=model)
         self.summarizer = SummarizerAgent(model=model)

@@ -307,8 +307,7 @@ tests/
   test_agents.py
   test_orchestrator.py
 
-ui/                        # Streamlit app (legacy path preserved)
-streamlit_app/             # Mirror namespace for future multi-page expansion
+ui/                        # Streamlit app
 agent_defs/                # Legacy supervisor — now a thin bridge to src/
 orchestration/             # AgentTree, HITLManager, StreamingCallbackHandler
 models/                    # Legacy Pydantic models consumed by the Streamlit UI
@@ -317,20 +316,17 @@ main.py                    # `streamlit run main.py` entry point
 
 ## Backward compatibility
 
-The previous version exposed `SupervisorAgent`, `SimpleAgent`,
-`MathAgent`, `EchoAgent`, and `ClassifierAgent`. The names are
-preserved:
+The previous version was a flat ReAct system built on the `openai-agents`
+SDK with `SimpleAgent`, `MathAgent`, `EchoAgent`, and `ClassifierAgent`
+worker agents. That layer has been removed; only the supervisor entry
+point name is preserved:
 
 - `agent_defs.supervisor.SupervisorAgent` is now a thin bridge that
   delegates every call to `src.orchestrator.RootSupervisorAgent` while
   exposing the same `orchestrate` / `orchestrate_manual` /
   `resume_orchestration` / `state` API the Streamlit app already
-  consumes.
-- `SupervisorAgent.CHILD_AGENT_MAP` still resolves the old worker agent
-  module paths, but the live `child_agents` dict now reflects the new
-  3-layer hierarchy.
-- The legacy worker agents (`SimpleAgent`, `MathAgent`, …) are only
-  imported when the optional `openai-agents` SDK is installed.
+  consumes. Its `child_agents` dict reflects the live 3-layer hierarchy
+  (managers + workers under `src/`).
 
 ## Future improvements
 
@@ -339,8 +335,6 @@ preserved:
 - Add a `PlannerAgent` that uses the LLM to produce non-trivial multi-
   step plans (instead of the current 1-2 task plans).
 - Add streaming token rendering in the Streamlit UI when an
-  `OPENAI_API_KEY` is configured.
+  `ANTHROPIC_API_KEY` is configured.
 - Persist `OrchestratorState` to disk and add a "rerun from step N"
   control to the state inspector.
-- Wire the supervisor into the existing Temporal workflow scaffolding
-  for durable execution.

@@ -28,7 +28,7 @@ class RAGAgent(ReasoningAgent):
     name = "RAGAgent"
     system_prompt = _SYSTEM_PROMPT
 
-    def __init__(self, model: str = "gpt-4.1-nano", top_k: int = 2) -> None:
+    def __init__(self, model: str = "claude-opus-4-8", top_k: int = 2) -> None:
         super().__init__(model=model)
         self._documents = load_knowledge_base()
         self._retriever = SimpleRetriever(self._documents)

@@ -49,7 +49,7 @@ class CodingAgent(ReasoningAgent):
     name = "CodingAgent"
     system_prompt = _SYSTEM_PROMPT
 
-    def __init__(self, model: str = "gpt-4.1-nano") -> None:
+    def __init__(self, model: str = "claude-opus-4-8") -> None:
         super().__init__(model=model)
         self.tools = [
             ToolSpec(
@@ -124,10 +124,10 @@ class CodingAgent(ReasoningAgent):
         if not code:
             return (
                 "[mock-llm] No code produced (no tools succeeded). "
-                "Set OPENAI_API_KEY for real code synthesis."
+                "Set ANTHROPIC_API_KEY for real code synthesis."
             )
         return (
-            "[mock-llm] Template/skeleton produced; set OPENAI_API_KEY "
+            "[mock-llm] Template/skeleton produced; set ANTHROPIC_API_KEY "
             f"for real code synthesis.\n```python\n{code}\n```"
         )
 
